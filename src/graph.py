@@ -12,18 +12,61 @@ import json
 
 from src import keys
 
+# Deletes a node, its out-edges, and (best-effort) the other side of its in-edges, all
+# as one server-side script. A crash between separate client round-trips could leave
+# the node gone but its edges still dangling (or the reverse); a single EVAL is atomic
+# from Redis's point of view and its effects replicate/persist to AOF as one unit, so
+# there's no window where only part of the deletion has taken hold.
+#
+# Key names are computed in Lua from ARGV[1] rather than declared via KEYS, since the
+# set of keys touched (one per source of an in-edge) isn't known until the script runs.
+# That's fine for a single Redis instance (see docker-compose.yml) but would need
+# reworking for Redis Cluster, where every touched key must hash to the same slot.
+_DELETE_NODE_LUA = """
+local node_id = ARGV[1]
+local node_key = 'nutmeg:nodes:' .. node_id
+if redis.call('EXISTS', node_key) == 0 then
+    return 0
+end
+
+local edge_types_key = 'nutmeg:edge_types:' .. node_id
+for _, edge_type in ipairs(redis.call('SMEMBERS', edge_types_key)) do
+    local edges_key = 'nutmeg:edges:' .. node_id .. ':' .. edge_type
+    for _, target_id in ipairs(redis.call('ZRANGE', edges_key, 0, -1)) do
+        redis.call('DEL', 'nutmeg:edge_attrs:' .. node_id .. ':' .. edge_type .. ':' .. target_id)
+    end
+    redis.call('DEL', edges_key)
+end
+redis.call('DEL', edge_types_key)
+
+-- Best-effort cleanup of the other side of each in-edge. Entries here may be stale
+-- (delete_edge doesn't trim this list), so zrem/zcard below tolerate misses.
+local in_edges_key = 'nutmeg:in_edges:' .. node_id
+for _, entry in ipairs(redis.call('LRANGE', in_edges_key, 0, -1)) do
+    local sep = string.find(entry, '|', 1, true)
+    local edge_type = string.sub(entry, 1, sep - 1)
+    local source_node = string.sub(entry, sep + 1)
+    local source_edges_key = 'nutmeg:edges:' .. source_node .. ':' .. edge_type
+    redis.call('ZREM', source_edges_key, node_id)
+    redis.call('DEL', 'nutmeg:edge_attrs:' .. source_node .. ':' .. edge_type .. ':' .. node_id)
+    if redis.call('ZCARD', source_edges_key) == 0 then
+        redis.call('SREM', 'nutmeg:edge_types:' .. source_node, edge_type)
+    end
+end
+redis.call('DEL', in_edges_key)
+redis.call('DEL', node_key)
+return 1
+"""
+
 
 def _decode_set(values) -> set:
     return {v.decode() for v in values}
 
 
-def _decode_list(values) -> list:
-    return [v.decode() for v in values]
-
-
 class NutmegGraph:
     def __init__(self, redis_client):
         self._r = redis_client
+        self._delete_node_script = redis_client.register_script(_DELETE_NODE_LUA)
 
     # -- nodes ---------------------------------------------------------
 
@@ -35,29 +78,12 @@ class NutmegGraph:
         )
 
     def delete_node(self, node_id: str) -> None:
-        """Remove a node, its out-edges, and (best-effort) its in-edges. No-op if absent."""
-        if not self._r.exists(keys.node_key(node_id)):
-            return
+        """Remove a node, its out-edges, and (best-effort) its in-edges. No-op if absent.
 
-        for edge_type in _decode_set(self._r.smembers(keys.edge_types_key(node_id))):
-            edges_key = keys.edges_key(node_id, edge_type)
-            for target_id in _decode_set(self._r.zrange(edges_key, 0, -1)):
-                self._r.delete(keys.edge_attrs_key(node_id, edge_type, target_id))
-            self._r.delete(edges_key)
-        self._r.delete(keys.edge_types_key(node_id))
-
-        # Best-effort cleanup of the other side of each in-edge. Entries here may be
-        # stale (delete_edge doesn't trim this list) so zrem/zcard tolerate misses.
-        for entry in _decode_list(self._r.lrange(keys.in_edges_key(node_id), 0, -1)):
-            edge_type, source_node = keys.parse_in_edge_entry(entry)
-            source_edges_key = keys.edges_key(source_node, edge_type)
-            self._r.zrem(source_edges_key, node_id)
-            self._r.delete(keys.edge_attrs_key(source_node, edge_type, node_id))
-            if self._r.zcard(source_edges_key) == 0:
-                self._r.srem(keys.edge_types_key(source_node), edge_type)
-
-        self._r.delete(keys.in_edges_key(node_id))
-        self._r.delete(keys.node_key(node_id))
+        Atomic: runs as a single Lua script so it can't be interrupted partway,
+        leaving the node deleted but edges still pointing at it (or vice versa).
+        """
+        self._delete_node_script(args=[node_id])
 
     # -- edges -----------------------------------------------------------
 

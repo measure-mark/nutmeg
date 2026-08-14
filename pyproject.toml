@@ -11,7 +11,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "fakeredis"]
+# lupa is fakeredis's optional Lua backend -- needed so fakeredis can run the
+# EVAL/EVALSHA scripts NutmegGraph.delete_node uses for atomicity.
+dev = ["pytest", "fakeredis", "lupa"]
 
 [tool.pytest.ini_options]
 # The repo is imported with its root on sys.path (`from src...`).
