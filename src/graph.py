@@ -58,6 +58,72 @@ redis.call('DEL', node_key)
 return 1
 """
 
+# Upserts a directed edge -- the zset entry, the edge_types index, the attrs key, and
+# the in_edges hint on the target -- as one script, for the same reason as above: a
+# crash between separate round-trips could leave the edge visible in the zset before
+# its attributes or in_edges hint were ever written.
+#
+# Equivalent non-atomic Python, for readers who'd rather not parse Lua:
+#
+#     def add_edge(self, source_node, target_node, edge_type, attributes=None, score=0):
+#         self._r.zadd(keys.edges_key(source_node, edge_type), {target_node: score})
+#         self._r.sadd(keys.edge_types_key(source_node), edge_type)
+#
+#         attrs_key = keys.edge_attrs_key(source_node, edge_type, target_node)
+#         if attributes:
+#             self._r.set(attrs_key, json.dumps(attributes))
+#         else:
+#             self._r.delete(attrs_key)
+#
+#         self._r.rpush(keys.in_edges_key(target_node), keys.in_edge_entry(edge_type, source_node))
+_ADD_EDGE_LUA = """
+local source_node = ARGV[1]
+local target_node = ARGV[2]
+local edge_type = ARGV[3]
+local score = ARGV[4]
+local attributes_json = ARGV[5]  -- empty string is the "no attributes" sentinel
+
+local edges_key = 'nutmeg:edges:' .. source_node .. ':' .. edge_type
+redis.call('ZADD', edges_key, score, target_node)
+redis.call('SADD', 'nutmeg:edge_types:' .. source_node, edge_type)
+
+local attrs_key = 'nutmeg:edge_attrs:' .. source_node .. ':' .. edge_type .. ':' .. target_node
+if attributes_json ~= '' then
+    redis.call('SET', attrs_key, attributes_json)
+else
+    redis.call('DEL', attrs_key)
+end
+
+redis.call('RPUSH', 'nutmeg:in_edges:' .. target_node, edge_type .. '|' .. source_node)
+return 1
+"""
+
+# Removes a directed edge and, if that emptied its zset, drops the edge_type out of the
+# index too -- as one script, so a crash can't leave the index claiming an edge_type
+# that no longer has any edges (or the reverse).
+#
+# Equivalent non-atomic Python:
+#
+#     def delete_edge(self, source_node, target_node, edge_type):
+#         edges_key = keys.edges_key(source_node, edge_type)
+#         self._r.zrem(edges_key, target_node)
+#         self._r.delete(keys.edge_attrs_key(source_node, edge_type, target_node))
+#         if self._r.zcard(edges_key) == 0:
+#             self._r.srem(keys.edge_types_key(source_node), edge_type)
+_DELETE_EDGE_LUA = """
+local source_node = ARGV[1]
+local target_node = ARGV[2]
+local edge_type = ARGV[3]
+
+local edges_key = 'nutmeg:edges:' .. source_node .. ':' .. edge_type
+redis.call('ZREM', edges_key, target_node)
+redis.call('DEL', 'nutmeg:edge_attrs:' .. source_node .. ':' .. edge_type .. ':' .. target_node)
+if redis.call('ZCARD', edges_key) == 0 then
+    redis.call('SREM', 'nutmeg:edge_types:' .. source_node, edge_type)
+end
+return 1
+"""
+
 
 def _decode_set(values) -> set:
     return {v.decode() for v in values}
@@ -67,6 +133,8 @@ class NutmegGraph:
     def __init__(self, redis_client):
         self._r = redis_client
         self._delete_node_script = redis_client.register_script(_DELETE_NODE_LUA)
+        self._add_edge_script = redis_client.register_script(_ADD_EDGE_LUA)
+        self._delete_edge_script = redis_client.register_script(_DELETE_EDGE_LUA)
 
     # -- nodes ---------------------------------------------------------
 
@@ -95,25 +163,21 @@ class NutmegGraph:
         attributes: dict | None = None,
         score: float = 0,
     ) -> None:
-        """Upsert a directed edge. Idempotent: re-adding updates score/attributes in place."""
-        self._r.zadd(keys.edges_key(source_node, edge_type), {target_node: score})
-        self._r.sadd(keys.edge_types_key(source_node), edge_type)
+        """Upsert a directed edge. Idempotent: re-adding updates score/attributes in place.
 
-        attrs_key = keys.edge_attrs_key(source_node, edge_type, target_node)
-        if attributes:
-            self._r.set(attrs_key, json.dumps(attributes))
-        else:
-            self._r.delete(attrs_key)
-
-        self._r.rpush(keys.in_edges_key(target_node), keys.in_edge_entry(edge_type, source_node))
+        Atomic: runs as a single Lua script (see _ADD_EDGE_LUA) so the zset entry, the
+        edge_types index, the attrs key, and the in_edges hint all land together.
+        """
+        attributes_json = json.dumps(attributes) if attributes else ""
+        self._add_edge_script(args=[source_node, target_node, edge_type, score, attributes_json])
 
     def delete_edge(self, source_node: str, target_node: str, edge_type: str) -> None:
-        """Remove a directed edge. No-op if it doesn't exist."""
-        edges_key = keys.edges_key(source_node, edge_type)
-        self._r.zrem(edges_key, target_node)
-        self._r.delete(keys.edge_attrs_key(source_node, edge_type, target_node))
-        if self._r.zcard(edges_key) == 0:
-            self._r.srem(keys.edge_types_key(source_node), edge_type)
+        """Remove a directed edge. No-op if it doesn't exist.
+
+        Atomic: runs as a single Lua script (see _DELETE_EDGE_LUA) so the zset entry,
+        the attrs key, and the edge_types index all update together.
+        """
+        self._delete_edge_script(args=[source_node, target_node, edge_type])
 
     # -- queries -----------------------------------------------------------
 
