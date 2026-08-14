@@ -1,0 +1,13 @@
+name: nutmeg
+channels:
+  - conda-forge
+dependencies:
+  - python=3.14
+  - pytest
+  - pip
+  - pip:
+      - redis
+      - mcp
+      - fakeredis
+      - fastapi
+      - uvicorn

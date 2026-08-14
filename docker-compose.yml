@@ -1,0 +1,50 @@
+services:
+  app-base: &app-build
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.14-slim
+        WORKDIR /app
+        COPY pyproject.toml ./
+        RUN pip install --no-cache-dir redis mcp fastapi uvicorn
+        COPY src/ ./src/
+        COPY api/ ./api/
+        ENV PYTHONPATH=/app \
+            PYTHONUNBUFFERED=1
+
+  redis:
+    # TODO, this should be redis 8.10
+    image: redis:8-alpine
+    # appendonly so the graph survives a restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      # nba's docker-compose already binds 127.0.0.1:6379 for its own redis, so this
+      # one is published on 6380 instead. The container itself still listens on the
+      # standard 6379 -- only the host-side port is shifted.
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    <<: *app-build
+    command: ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      # Host port 8000 is already in use locally by something unrelated to nba or
+      # nutmeg, so this is published on 8001 instead. The container still listens
+      # on the standard 8000.
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:

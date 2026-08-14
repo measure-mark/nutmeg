@@ -1,0 +1,20 @@
+[project]
+name = "nutmeg"
+version = "0.1.0"
+description = "In-memory graph database backed by Redis"
+requires-python = ">=3.14"
+dependencies = [
+    "redis",
+    "mcp",
+    "fastapi",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "fakeredis"]
+
+[tool.pytest.ini_options]
+# The repo is imported with its root on sys.path (`from src...`).
+# Without this, pytest only puts tests/ on the path and collection fails.
+pythonpath = ["."]
+testpaths = ["tests"]
