@@ -4,13 +4,14 @@ Follows the same wiring convention as nba/mcp_server/server.py: a REDIS_URL
 env var (defaulting to localhost) read once at module scope, and the
 resulting client handed to the domain class by dependency injection.
 
-Run with: uvicorn api.server:app --reload
+This module only defines the app -- run it via the repo-root main.py
+(`python main.py`), or with `uvicorn src.api.server:app --reload` for
+local autoreload during development.
 """
 
 import os
 
 import redis
-import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -75,7 +76,3 @@ def add_edge(edge: EdgeCreate) -> None:
 @app.delete("/edges", status_code=204)
 def delete_edge(source_node: str, target_node: str, edge_type: str) -> None:
     graph.delete_edge(source_node, target_node, edge_type)
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)

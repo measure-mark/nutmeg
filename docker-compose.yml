@@ -8,7 +8,7 @@ services:
         COPY pyproject.toml ./
         RUN pip install --no-cache-dir redis mcp fastapi uvicorn
         COPY src/ ./src/
-        COPY api/ ./api/
+        COPY main.py ./
         ENV PYTHONPATH=/app \
             PYTHONUNBUFFERED=1
 
@@ -33,7 +33,7 @@ services:
 
   api:
     <<: *app-build
-    command: ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python", "main.py"]
     environment:
       REDIS_URL: redis://redis:6379/0
     ports:

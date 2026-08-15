@@ -14,7 +14,7 @@ import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 
-import api.server as server
+import src.api.server as server
 from src.graph import NutmegGraph
 
 

@@ -11,12 +11,19 @@ See `CLAUDE.md` for the coding conventions this repo follows.
 
 ## Layout
 
+All application code lives under `src/`; `main.py` at the repo root is the one
+obvious entry point that runs it.
+
+- `main.py` — run with `python main.py`. Just a launcher: imports the FastAPI
+  app and hands it to uvicorn.
 - `src/graph.py` — `NutmegGraph`, the core API (`add_node`, `add_edge`, `get_degree`,
   `get_neighbors`, `delete_edge`, `delete_node`). Talks to Redis directly; no ORM,
   no in-memory layer yet.
 - `src/keys.py` — the Redis key-naming scheme, in one place.
-- `api/server.py` — a FastAPI app that exposes `NutmegGraph` over HTTP.
-- `mcp/` — reserved for an MCP server exposing the graph to model clients (not built yet).
+- `src/api/server.py` — a FastAPI app that exposes `NutmegGraph` over HTTP.
+- `src/mcp_server/` — reserved for an MCP server exposing the graph to model
+  clients (not built yet). Named `mcp_server`, not `mcp`, so it doesn't shadow
+  the `mcp` SDK package this project also depends on.
 - `tests/` — pytest, against `fakeredis` (no real Redis needed to run the suite).
 
 ## Quickstart
@@ -45,7 +52,14 @@ already a separate field, so an id shouldn't repeat it (e.g. `player:ada`).
 ```
 conda env create -f environment.yml   # once
 conda activate nutmeg
-REDIS_URL=redis://localhost:6380/0 uvicorn api.server:app --reload
+REDIS_URL=redis://localhost:6380/0 python main.py
+```
+
+For autoreload during development, run uvicorn directly instead -- reload needs
+an import-string target, which `main.py` doesn't give it:
+
+```
+REDIS_URL=redis://localhost:6380/0 uvicorn src.api.server:app --reload
 ```
 
 `REDIS_URL` defaults to `redis://localhost:6379/0` if unset -- override it if your
