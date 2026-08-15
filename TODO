@@ -4,3 +4,7 @@
 2. graph traversal engine called "dribble", will use a topological sort
 
 3.  Move redis space so that multiple graphs can exist, nutmeg:default:... or nutmeg:nba:...
+
+4. unit tests with fakearedis are useless, we need integration tests
+
+5.  How do we handle lost conections with redis?

@@ -41,9 +41,12 @@ redis.call('DEL', edge_types_key)
 
 -- Best-effort cleanup of the other side of each in-edge. Entries here may be stale
 -- (delete_edge doesn't trim this list), so zrem/zcard below tolerate misses.
+-- ':' is safe as the entry's internal delimiter here because both edge_type and
+-- source_node are validated colon-free before an edge is ever written (see
+-- keys.is_valid_identifier), so exactly one ':' ever appears in an entry.
 local in_edges_key = 'nutmeg:in_edges:' .. node_id
 for _, entry in ipairs(redis.call('LRANGE', in_edges_key, 0, -1)) do
-    local sep = string.find(entry, '|', 1, true)
+    local sep = string.find(entry, ':', 1, true)
     local edge_type = string.sub(entry, 1, sep - 1)
     local source_node = string.sub(entry, sep + 1)
     local source_edges_key = 'nutmeg:edges:' .. source_node .. ':' .. edge_type
@@ -103,7 +106,7 @@ else
     redis.call('DEL', attrs_key)
 end
 
-redis.call('RPUSH', 'nutmeg:in_edges:' .. target_node, edge_type .. '|' .. source_node)
+redis.call('RPUSH', 'nutmeg:in_edges:' .. target_node, edge_type .. ':' .. source_node)
 return 1
 """
 
@@ -138,6 +141,13 @@ def _decode_set(values) -> set:
     return {v.decode() for v in values}
 
 
+def _check_identifier(value: str, label: str) -> None:
+    """Raise ValueError naming the field if value isn't a valid node_id/edge_type.
+    One place for this instead of a copy-pasted if/raise at every call site."""
+    if not keys.is_valid_identifier(value):
+        raise ValueError(f"Invalid {label}: {value!r}")
+
+
 class NutmegGraph:
     def __init__(self, redis_client):
         self._r = redis_client
@@ -146,8 +156,7 @@ class NutmegGraph:
 
     def add_node(self, node_id: str, node_type: str, attributes: dict | None = None) -> None:
         """Upsert a node. Idempotent: identical calls leave identical state."""
-        if not keys.is_valid_node_id(node_id):
-            raise ValueError("Invalid node_id")
+        _check_identifier(node_id, "node_id")
         self._r.hset(
             keys.node_key(node_id),
             mapping={"node_type": node_type, "attributes": json.dumps(attributes or {})},
@@ -159,8 +168,7 @@ class NutmegGraph:
         Atomic: runs as a single Lua script so it can't be interrupted partway,
         leaving the node deleted but edges still pointing at it (or vice versa).
         """
-        if not keys.is_valid_node_id(node_id):
-            raise ValueError("Invalid node_id")
+        _check_identifier(node_id, "node_id")
 
         # Called directly with eval() rather than through a registered Script wrapper --
         # this script is only ever used here, so there's nothing to gain from stashing
@@ -185,10 +193,9 @@ class NutmegGraph:
 
         Raises ValueError if source_node or target_node hasn't been added yet.
         """
-        if not keys.is_valid_node_id(source_node):
-            raise ValueError("Invalid node_id")
-        if not keys.is_valid_node_id(target_node):
-            raise ValueError("Invalid node_id")
+        _check_identifier(source_node, "node_id")
+        _check_identifier(target_node, "node_id")
+        _check_identifier(edge_type, "edge_type")
 
         attributes_json = json.dumps(attributes) if attributes else ""
         result = self._r.eval(
@@ -205,10 +212,9 @@ class NutmegGraph:
         Atomic: runs as a single Lua script (see _DELETE_EDGE_LUA) so the zset entry,
         the attrs key, and the edge_types index all update together.
         """
-        if not keys.is_valid_node_id(source_node):
-            raise ValueError("Invalid node_id")
-        if not keys.is_valid_node_id(target_node):
-            raise ValueError("Invalid node_id")
+        _check_identifier(source_node, "node_id")
+        _check_identifier(target_node, "node_id")
+        _check_identifier(edge_type, "edge_type")
 
         # Same reasoning as delete_node: called directly with eval(), no registered
         # Script wrapper, since nothing else calls this script.
@@ -219,14 +225,14 @@ class NutmegGraph:
     def get_degree(self, node_id: str, edge_type: str | None = None):
         """Out-degree. A single count for one edge_type, else {total, by_type}.
 
-        Raises ValueError if node_id is malformed or the node hasn't been added.
+        Raises ValueError if node_id/edge_type is malformed or the node hasn't been added.
         """
-        if not keys.is_valid_node_id(node_id):
-            raise ValueError("Invalid node_id")
+        _check_identifier(node_id, "node_id")
         if not self._r.exists(keys.node_key(node_id)):
             raise ValueError(f"node {node_id!r} does not exist")
 
         if edge_type is not None:
+            _check_identifier(edge_type, "edge_type")
             return self._r.zcard(keys.edges_key(node_id, edge_type))
 
         by_type = {
@@ -242,12 +248,13 @@ class NutmegGraph:
         break by node_id, since edge_types can come back from a Redis SET whose
         iteration order isn't guaranteed. Empty/None edge_types means all types.
 
-        Raises ValueError if node_id is malformed or the node hasn't been added.
+        Raises ValueError if node_id/edge_types is malformed or the node hasn't been added.
         """
-        if not keys.is_valid_node_id(node_id):
-            raise ValueError("Invalid node_id")
+        _check_identifier(node_id, "node_id")
         if not self._r.exists(keys.node_key(node_id)):
             raise ValueError(f"node {node_id!r} does not exist")
+        for edge_type in edge_types or []:
+            _check_identifier(edge_type, "edge_type")
 
         types = edge_types or _decode_set(self._r.smembers(keys.edge_types_key(node_id)))
         best_score: dict[str, float] = {}

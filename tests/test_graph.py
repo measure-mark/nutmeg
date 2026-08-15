@@ -9,6 +9,7 @@ be repeating information the store already has.
 """
 
 import fakeredis
+import pytest
 
 from src.graph import NutmegGraph
 
@@ -57,22 +58,30 @@ def test_add_edge_raises_if_source_node_does_not_exist():
     g = NutmegGraph(fakeredis.FakeStrictRedis())
     g.add_node("celtics", "team")
 
-    try:
+    with pytest.raises(ValueError):
         g.add_edge("ada", "celtics", "plays_for")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_add_edge_raises_if_target_node_does_not_exist():
     g = NutmegGraph(fakeredis.FakeStrictRedis())
     g.add_node("ada", "player")
 
-    try:
+    with pytest.raises(ValueError):
         g.add_edge("ada", "celtics", "plays_for")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
+
+
+def test_add_edge_raises_for_colon_in_edge_type():
+    """Regression: edge_type used to be concatenated into the in_edges hint entry
+    unvalidated (edge_type + ':' + source_node), so a ':' inside edge_type would be
+    misparsed as the field boundary when delete_node later split the entry back
+    apart -- corrupting which source/edge_type delete_node's cascade cleaned up.
+    Now rejected up front, before an edge (or its hint entry) is ever written."""
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player")
+    g.add_node("celtics", "team")
+
+    with pytest.raises(ValueError):
+        g.add_edge("ada", "celtics", "rel:bad")
 
 
 def test_get_degree_splits_by_edge_type():
@@ -154,20 +163,39 @@ def test_get_neighbors_dedupes_across_edge_types():
 
 def test_get_degree_raises_if_node_does_not_exist():
     g = NutmegGraph(fakeredis.FakeStrictRedis())
-    try:
+    with pytest.raises(ValueError):
         g.get_degree("ghost")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_get_neighbors_raises_if_node_does_not_exist():
     g = NutmegGraph(fakeredis.FakeStrictRedis())
-    try:
+    with pytest.raises(ValueError):
         g.get_neighbors("ghost")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
+
+
+def test_get_degree_raises_for_colon_in_edge_type():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player")
+
+    with pytest.raises(ValueError):
+        g.get_degree("ada", "rel:bad")
+
+
+def test_get_neighbors_raises_for_colon_in_edge_type():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player")
+
+    with pytest.raises(ValueError):
+        g.get_neighbors("ada", ["rel:bad"])
+
+
+def test_delete_edge_raises_for_colon_in_edge_type():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player")
+    g.add_node("celtics", "team")
+
+    with pytest.raises(ValueError):
+        g.delete_edge("ada", "celtics", "rel:bad")
 
 
 def test_delete_edge_is_idempotent():
