@@ -11,7 +11,8 @@ import os
 
 import redis
 import uvicorn
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from src.graph import NutmegGraph
@@ -21,6 +22,13 @@ _redis = redis.from_url(REDIS_URL)
 graph = NutmegGraph(_redis)
 
 app = FastAPI(title="nutmeg")
+
+
+@app.exception_handler(ValueError)
+def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """NutmegGraph raises ValueError for a malformed/missing node_id -- that's a bad
+    request, not a server error, so it maps to 400 rather than an unhandled 500."""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 class NodeCreate(BaseModel):

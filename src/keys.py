@@ -4,6 +4,10 @@ Kept as one small module so `graph.py` and its tests share a single source of
 truth for the key format, instead of formatting keys ad hoc in each place.
 """
 
+def is_valid_node_id(node_id: str) -> bool:
+    if ':' in node_id:
+        return False
+    return True
 
 def node_key(node_id: str) -> str:
     return f"nutmeg:nodes:{node_id}"

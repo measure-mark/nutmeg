@@ -34,8 +34,11 @@ Redis itself is published on `127.0.0.1:6380` for host tools like `redis-cli`.
 ```
 curl -X POST http://127.0.0.1:8001/nodes \
   -H 'Content-Type: application/json' \
-  -d '{"node_id": "player:1", "node_type": "player", "attributes": {"name": "Ada"}}'
+  -d '{"node_id": "ada", "node_type": "player", "attributes": {"name": "Ada"}}'
 ```
+
+Node ids are plain, globally-unique strings (e.g. `ada`, `celtics`) -- `node_type` is
+already a separate field, so an id shouldn't repeat it (e.g. `player:ada`).
 
 ### Local (conda env)
 
