@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
-from urllib.error import HTTPError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+import httpx
 
-from src.query_plan import QueryStage, load_query_plan, topological_stage_names
 from src.query_response import QueryResult, load_query_response
 
 
@@ -16,10 +14,6 @@ def _as_node_list(nodes: str | list[str] | tuple[str, ...]) -> list[str]:
     if isinstance(nodes, str):
         return [nodes]
     return list(nodes)
-
-
-def _unique(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(values))
 
 
 def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -33,19 +27,27 @@ class NutmegHTTPError(RuntimeError):
         self.detail = detail
 
 
-class Nutmeg:
-    def __init__(self, base_url: str = "http://127.0.0.1:3879", timeout: float = 10):
+class NutmegClient:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:3879",
+        timeout: float = 10,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def get_node(self, node_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/nodes/{node_id}")
+    async def get_node(self, node_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/nodes/{node_id}")
 
-    def get_degree(self, node_id: str, edge_type: str | None = None):
+    async def get_degree(
+        self,
+        node_id: str,
+        edge_type: str | None = None,
+    ):
         params = {"edge_type": edge_type} if edge_type is not None else None
-        return self._request("GET", f"/nodes/{node_id}/degree", params=params)
+        return await self._request("GET", f"/nodes/{node_id}/degree", params=params)
 
-    def get_neighbors(
+    async def get_neighbors(
         self,
         node_id: str,
         edge_types: list[str] | None = None,
@@ -60,7 +62,11 @@ class Nutmeg:
                 "end": end,
             }
         )
-        return self._request("GET", f"/nodes/{node_id}/neighbors", params=params or None)
+        return await self._request(
+            "GET",
+            f"/nodes/{node_id}/neighbors",
+            params=params or None,
+        )
 
     def query(
         self,
@@ -84,7 +90,7 @@ class Nutmeg:
     def query_from_json(self, data: str) -> "NutmegQuery":
         return NutmegQuery.from_json(self, data)
 
-    def _request(
+    async def _request(
         self,
         method: str,
         path: str,
@@ -93,29 +99,46 @@ class Nutmeg:
         body: dict[str, Any] | None = None,
     ):
         url = f"{self.base_url}{path}"
-        if params:
-            url = f"{url}?{urlencode(params, doseq=True)}"
-
-        data = None if body is None else json.dumps(body).encode()
-        request = Request(url, data=data, method=method)
-        if body is not None:
-            request.add_header("Content-Type", "application/json")
-
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            raw = exc.read()
-            detail = raw.decode() if raw else ""
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.request(method, url, params=params, json=body)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
             try:
-                detail = json.loads(detail).get("detail", detail)
-            except json.JSONDecodeError:
-                pass
-            raise NutmegHTTPError(exc.code, detail) from exc
+                detail = exc.response.json().get("detail", exc.response.text)
+            except (ValueError, AttributeError):
+                detail = exc.response.text
+            raise NutmegHTTPError(exc.response.status_code, detail) from exc
+        return response.json() if response.content else None
 
-        if not raw:
-            return None
-        return json.loads(raw)
+
+# Backwards-compatible import for clients migrating to the explicit name.
+Nutmeg = NutmegClient
+
+
+@dataclass(frozen=True)
+class _StageSpec:
+    name: str
+    kind: str
+    sources: tuple[str, ...] = ()
+    edge_type: str | None = None
+    start: float | None = None
+    end: float | None = None
+    degrees: bool = False
+    attributes: bool = False
+    scores: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        data = {"name": self.name, "kind": self.kind}
+        if self.sources:
+            data["sources"] = list(self.sources)
+        for field in ("edge_type", "start", "end"):
+            if getattr(self, field) is not None:
+                data[field] = getattr(self, field)
+        for field in ("degrees", "attributes", "scores"):
+            if getattr(self, field):
+                data[field] = True
+        return data
 
 
 class Stage:
@@ -144,9 +167,6 @@ class Stage:
             attributes=attributes,
             scores=scores,
         )
-
-    def follow_edge(self, edge_type: str, **kwargs) -> "Stage":
-        return self.follow_edges(edge_type, **kwargs)
 
     def union(
         self,
@@ -212,7 +232,7 @@ class Stage:
 class NutmegQuery:
     def __init__(
         self,
-        client: Nutmeg,
+        client: NutmegClient,
         start_nodes: str | list[str] | tuple[str, ...],
         *,
         name: str = "start_stage",
@@ -220,11 +240,11 @@ class NutmegQuery:
         attributes: bool = False,
     ):
         self.client = client
-        self.start_nodes = _unique(_as_node_list(start_nodes))
+        self.start_nodes = list(dict.fromkeys(_as_node_list(start_nodes)))
         if not self.start_nodes:
             raise ValueError("query must contain at least one start node")
-        self._stages: dict[str, QueryStage] = {
-            name: QueryStage(
+        self._stages: dict[str, _StageSpec] = {
+            name: _StageSpec(
                 name=name,
                 kind="start",
                 degrees=degrees,
@@ -237,16 +257,10 @@ class NutmegQuery:
     def follow_edges(self, edge_type: str, **kwargs) -> Stage:
         return self.start.follow_edges(edge_type, **kwargs)
 
-    def follow_edge(self, edge_type: str, **kwargs) -> Stage:
-        return self.follow_edges(edge_type, **kwargs)
-
-    def execute(self) -> "QueryResult":
+    async def execute(self) -> "QueryResult":
         payload = self.to_dict()
-        plan = load_query_plan(payload)
-        self._result = load_query_response(
-            self.client._request("POST", "/queries/execute", body=payload),
-            plan=plan,
-        )
+        response = await self.client._request("POST", "/queries/execute", body=payload)
+        self._result = load_query_response(response)
         return self._result
 
     def get_nodes(self, stage: str | Stage) -> list[str]:
@@ -259,9 +273,6 @@ class NutmegQuery:
             raise RuntimeError("query has not been executed")
         return self._result.get_scores(self._stage_name(stage))
 
-    def topological_stage_names(self) -> list[str]:
-        return topological_stage_names(self._stages)
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "wire_version": 1,
@@ -273,16 +284,27 @@ class NutmegQuery:
         return json.dumps(self.to_dict(), separators=(",", ":"), sort_keys=True)
 
     @classmethod
-    def from_dict(cls, client: Nutmeg, data: dict[str, Any]) -> "NutmegQuery":
-        plan = load_query_plan(data)
-        start_stage = next(stage for stage in plan.stages.values() if stage.kind == "start")
-        query = cls(client, plan.start_nodes, name=start_stage.name)
-        query._stages = plan.stages
+    def from_dict(cls, client: NutmegClient, data: dict[str, Any]) -> "NutmegQuery":
+        start_nodes = list(dict.fromkeys(data["start_nodes"]))
+        specs = [_StageSpec(
+            name=spec["name"],
+            kind=spec["kind"],
+            sources=tuple(spec.get("sources", ())),
+            edge_type=spec.get("edge_type"),
+            start=spec.get("start"),
+            end=spec.get("end"),
+            degrees=spec.get("degrees", False),
+            attributes=spec.get("attributes", False),
+            scores=spec.get("scores", False),
+        ) for spec in data["stage_specs"]]
+        start_stage = next(stage for stage in specs if stage.kind == "start")
+        query = cls(client, start_nodes, name=start_stage.name)
+        query._stages = {spec.name: spec for spec in specs}
         query.start = Stage(query, start_stage.name)
         return query
 
     @classmethod
-    def from_json(cls, client: Nutmeg, data: str) -> "NutmegQuery":
+    def from_json(cls, client: NutmegClient, data: str) -> "NutmegQuery":
         return cls.from_dict(client, json.loads(data))
 
     def _add_follow_stage(
@@ -299,7 +321,7 @@ class NutmegQuery:
     ) -> Stage:
         stage_name = name or self._next_name("stage")
         self._add_stage(
-            QueryStage(
+            _StageSpec(
                 name=stage_name,
                 kind="follow",
                 sources=(source,),
@@ -327,7 +349,7 @@ class NutmegQuery:
             raise ValueError(f"{kind} requires exactly two stages")
         stage_name = name or self._next_name(kind)
         self._add_stage(
-            QueryStage(
+            _StageSpec(
                 name=stage_name,
                 kind=kind,
                 sources=stage_names,
@@ -337,7 +359,7 @@ class NutmegQuery:
         )
         return Stage(self, stage_name)
 
-    def _add_stage(self, spec: QueryStage) -> None:
+    def _add_stage(self, spec: _StageSpec) -> None:
         if spec.name in self._stages:
             raise ValueError(f"Stage {spec.name!r} already exists")
         for source in spec.sources:

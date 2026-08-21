@@ -24,6 +24,13 @@ ALLOWED_STAGE_FIELDS = {
 
 @dataclass(frozen=True)
 class QueryStage:
+    """One operation in a query plan.
+
+    ``kind`` identifies the operation: ``start`` supplies initial node ids,
+    ``follow`` traverses an edge type, and the set-operation kinds combine
+    the outputs of two earlier stages.
+    """
+
     name: str
     kind: str
     sources: tuple[str, ...] = ()

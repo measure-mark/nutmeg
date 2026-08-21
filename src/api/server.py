@@ -11,7 +11,7 @@ local autoreload during development.
 
 import os
 
-import redis
+import redis.asyncio as redis
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -27,7 +27,7 @@ app = FastAPI(title="nutmeg")
 
 
 @app.exception_handler(ValueError)
-def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
     """NutmegGraph raises ValueError for a malformed/missing node_id -- that's a bad
     request, not a server error, so it maps to 400 rather than an unhandled 500."""
     return JSONResponse(status_code=400, content={"detail": str(exc)})
@@ -48,33 +48,33 @@ class EdgeCreate(BaseModel):
 
 
 @app.post("/nodes", status_code=204)
-def add_node(node: NodeCreate) -> None:
-    graph.add_node(node.node_id, node.node_type, node.attributes)
+async def add_node(node: NodeCreate) -> None:
+    await graph.add_node(node.node_id, node.node_type, node.attributes)
 
 
 @app.delete("/nodes/{node_id}", status_code=204)
-def delete_node(node_id: str) -> None:
-    graph.delete_node(node_id)
+async def delete_node(node_id: str) -> None:
+    await graph.delete_node(node_id)
 
 
 @app.get("/nodes/{node_id}")
-def get_node(node_id: str) -> dict:
-    return graph.get_node(node_id)
+async def get_node(node_id: str) -> dict:
+    return await graph.get_node(node_id)
 
 
 @app.get("/nodes/{node_id}/degree")
-def get_degree(node_id: str, edge_type: str | None = None):
-    return graph.get_degree(node_id, edge_type)
+async def get_degree(node_id: str, edge_type: str | None = None):
+    return await graph.get_degree(node_id, edge_type)
 
 
 @app.get("/nodes/{node_id}/neighbors")
-def get_neighbors(
+async def get_neighbors(
     node_id: str,
     edge_types: list[str] = Query(default=[]),
     start: float | None = None,
     end: float | None = None,
 ) -> list[str]:
-    return graph.get_neighbors(
+    return await graph.get_neighbors(
         node_id,
         edge_types,
         start=start,
@@ -88,12 +88,12 @@ async def execute_query(query_plan: dict) -> dict:
 
 
 @app.post("/edges", status_code=204)
-def add_edge(edge: EdgeCreate) -> None:
-    graph.add_edge(
+async def add_edge(edge: EdgeCreate) -> None:
+    await graph.add_edge(
         edge.source_node, edge.target_node, edge.edge_type, edge.attributes, edge.score
     )
 
 
 @app.delete("/edges", status_code=204)
-def delete_edge(source_node: str, target_node: str, edge_type: str) -> None:
-    graph.delete_edge(source_node, target_node, edge_type)
+async def delete_edge(source_node: str, target_node: str, edge_type: str) -> None:
+    await graph.delete_edge(source_node, target_node, edge_type)

@@ -154,32 +154,32 @@ class NutmegGraph:
 
     # -- nodes ---------------------------------------------------------
 
-    def add_node(self, node_id: str, node_type: str, attributes: dict | None = None) -> None:
+    async def add_node(self, node_id: str, node_type: str, attributes: dict | None = None) -> None:
         """Upsert a node. Idempotent: identical calls leave identical state."""
         _check_identifier(node_id, "node_id")
-        self._r.hset(
+        await self._r.hset(
             keys.node_key(node_id),
             mapping={"node_type": node_type, "attributes": json.dumps(attributes or {})},
         )
 
-    def get_node(self, node_id: str) -> dict:
+    async def get_node(self, node_id: str) -> dict:
         """A node's type, attributes, and out-degree in one call. Reuses get_degree
         rather than re-deriving it, at the cost of one extra (cheap) EXISTS check.
 
         Raises ValueError if node_id is malformed or the node hasn't been added.
         """
         _check_identifier(node_id, "node_id")
-        node = self._r.hgetall(keys.node_key(node_id))
+        node = await self._r.hgetall(keys.node_key(node_id))
         if not node:
             raise ValueError(f"node {node_id!r} does not exist")
 
         return {
             "node_type": node[b"node_type"].decode(),
             "attributes": json.loads(node[b"attributes"]),
-            "degree": self.get_degree(node_id),
+            "degree": await self.get_degree(node_id),
         }
 
-    def delete_node(self, node_id: str) -> None:
+    async def delete_node(self, node_id: str) -> None:
         """Remove a node, its out-edges, and (best-effort) its in-edges. No-op if absent.
 
         Atomic: runs as a single Lua script so it can't be interrupted partway,
@@ -190,11 +190,11 @@ class NutmegGraph:
         # Called directly with eval() rather than through a registered Script wrapper --
         # this script is only ever used here, so there's nothing to gain from stashing
         # a one-line callable on self just to call it once.
-        self._r.eval(_DELETE_NODE_LUA, 0, node_id)
+        await self._r.eval(_DELETE_NODE_LUA, 0, node_id)
 
     # -- edges -----------------------------------------------------------
 
-    def add_edge(
+    async def add_edge(
         self,
         source_node: str,
         target_node: str,
@@ -215,7 +215,7 @@ class NutmegGraph:
         _check_identifier(edge_type, "edge_type")
 
         attributes_json = json.dumps(attributes) if attributes else ""
-        result = self._r.eval(
+        result = await self._r.eval(
             _ADD_EDGE_LUA, 0, source_node, target_node, edge_type, score, attributes_json
         )
         if result == -1:
@@ -223,7 +223,7 @@ class NutmegGraph:
         if result == -2:
             raise ValueError(f"target node {target_node!r} does not exist")
 
-    def delete_edge(self, source_node: str, target_node: str, edge_type: str) -> None:
+    async def delete_edge(self, source_node: str, target_node: str, edge_type: str) -> None:
         """Remove a directed edge. No-op if it doesn't exist.
 
         Atomic: runs as a single Lua script (see _DELETE_EDGE_LUA) so the zset entry,
@@ -235,30 +235,30 @@ class NutmegGraph:
 
         # Same reasoning as delete_node: called directly with eval(), no registered
         # Script wrapper, since nothing else calls this script.
-        self._r.eval(_DELETE_EDGE_LUA, 0, source_node, target_node, edge_type)
+        await self._r.eval(_DELETE_EDGE_LUA, 0, source_node, target_node, edge_type)
 
     # -- queries -----------------------------------------------------------
 
-    def get_degree(self, node_id: str, edge_type: str | None = None):
+    async def get_degree(self, node_id: str, edge_type: str | None = None):
         """Out-degree. A single count for one edge_type, else {total, by_type}.
 
         Raises ValueError if node_id/edge_type is malformed or the node hasn't been added.
         """
         _check_identifier(node_id, "node_id")
-        if not self._r.exists(keys.node_key(node_id)):
+        if not await self._r.exists(keys.node_key(node_id)):
             raise ValueError(f"node {node_id!r} does not exist")
 
         if edge_type is not None:
             _check_identifier(edge_type, "edge_type")
-            return self._r.zcard(keys.edges_key(node_id, edge_type))
+            return await self._r.zcard(keys.edges_key(node_id, edge_type))
 
         by_type = {
-            et: self._r.zcard(keys.edges_key(node_id, et))
-            for et in _decode_set(self._r.smembers(keys.edge_types_key(node_id)))
+            et: await self._r.zcard(keys.edges_key(node_id, et))
+            for et in _decode_set(await self._r.smembers(keys.edge_types_key(node_id)))
         }
         return {"total": sum(by_type.values()), "by_type": by_type}
 
-    def get_neighbors(
+    async def get_neighbors(
         self,
         node_id: str,
         edge_types: list[str] | None = None,
@@ -277,18 +277,18 @@ class NutmegGraph:
         Raises ValueError if node_id/edge_types is malformed or the node hasn't been added.
         """
         _check_identifier(node_id, "node_id")
-        if not self._r.exists(keys.node_key(node_id)):
+        if not await self._r.exists(keys.node_key(node_id)):
             raise ValueError(f"node {node_id!r} does not exist")
         for edge_type in edge_types or []:
             _check_identifier(edge_type, "edge_type")
 
-        types = edge_types or _decode_set(self._r.smembers(keys.edge_types_key(node_id)))
+        types = edge_types or _decode_set(await self._r.smembers(keys.edge_types_key(node_id)))
         best_score: dict[str, float] = {}
         min_score = "-inf" if start is None else start
         max_score = "+inf" if end is None else end
 
         for edge_type in types:
-            scored = self._r.zrangebyscore(
+            scored = await self._r.zrangebyscore(
                 keys.edges_key(node_id, edge_type),
                 min_score,
                 max_score,

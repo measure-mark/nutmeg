@@ -15,8 +15,8 @@ This module only defines the server; run it via the repo-root mcp_main.py
 
 import os
 
-import redis
-from mcp.server import MCPServer
+import redis.asyncio as redis
+from fastmcp import FastMCP
 
 from src.graph import NutmegGraph
 
@@ -24,13 +24,13 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis.from_url(REDIS_URL)
 graph = NutmegGraph(_redis)
 
-mcp = MCPServer("nutmeg", instructions="Read access to the Nutmeg graph.")
+mcp = FastMCP("nutmeg", instructions="Read access to the Nutmeg graph.")
 
 
 @mcp.tool()
-def get_node(node_id: str) -> dict:
+async def get_node(node_id: str) -> dict:
     """A node's type, attributes, and out-degree.
 
     node_id: the node to look up. Raises if it hasn't been added.
     """
-    return graph.get_node(node_id)
+    return await graph.get_node(node_id)

@@ -25,14 +25,14 @@ That sorted-set layout gives Nutmeg its query shape:
 The client talks to the HTTP API and has no third-party runtime dependency.
 
 ```python
-from src.client import Nutmeg
+from src.client import NutmegClient
 
-nutmeg = Nutmeg("http://127.0.0.1:3879")
+nutmeg = NutmegClient("http://127.0.0.1:3879")
 
-node = nutmeg.get_node("ada")
-degree = nutmeg.get_degree("ada")
-plays_for_degree = nutmeg.get_degree("ada", "plays_for")
-neighbors = nutmeg.get_neighbors("ada", ["connected_to"], start=10, end=20)
+node = await nutmeg.get_node("ada")
+degree = await nutmeg.get_degree("ada")
+plays_for_degree = await nutmeg.get_degree("ada", "plays_for")
+neighbors = await nutmeg.get_neighbors("ada", ["connected_to"], start=10, end=20)
 ```
 
 ## Server-Side Queries
@@ -42,7 +42,7 @@ the whole plan to `POST /queries/execute`. Nutmeg executes the traversal on the
 server against Redis and returns one packed response.
 
 ```python
-nutmeg = Nutmeg("http://127.0.0.1:3879")
+nutmeg = NutmegClient("http://127.0.0.1:3879")
 
 query = nutmeg.query("ada")
 connected = query.follow_edges(
@@ -56,14 +56,12 @@ connected = query.follow_edges(
 blocked = query.follow_edges("blocks", name="blocked")
 visible = connected.subtract(blocked, name="visible", degrees=True)
 
-result = query.execute()
+result = await query.execute()
 
 visible_ids = result.get_nodes("visible")
 connected_scores = result.get_scores("connected")
 bob = result.nodes["bob"]
 ```
-
-`follow_edge()` is an alias for `follow_edges()`.
 
 ## Set Operations
 
@@ -83,7 +81,7 @@ only_one_group = friends.symmetric_difference(teammates, name="only_one_group")
 
 posts = visible_network.follow_edges("posted", name="posts", attributes=True)
 
-result = query.execute()
+result = await query.execute()
 ```
 
 Set operations are binary. Chain them when you need more than two inputs:
@@ -139,20 +137,6 @@ saved_result = result.to_json()
 result = QueryResult.from_json(saved_result)
 ```
 
-## Layout
-
-All application code lives under `src/`; `main.py` and `mcp_main.py` at the repo
-root are the two obvious entry points that run it.
-
-- `main.py` -- run with `python main.py`. Imports the FastAPI app and hands it to uvicorn.
-- `mcp_main.py` -- run with `python mcp_main.py`. Same pattern, for the MCP server.
-- `src/graph.py` -- `NutmegGraph`, the core Redis-backed graph API.
-- `src/client.py` -- the Python HTTP client and lazy query builder.
-- `src/api/server.py` -- the FastAPI HTTP app.
-- `src/api/query_engine.py` -- server-side execution for client query plans.
-- `src/mcp_server/server.py` -- an MCP server exposing the graph to model clients.
-- `tests/` -- pytest coverage for graph, API, MCP, client query building, query execution, and live client integration.
-
 ## Quickstart
 
 ### Docker
@@ -202,13 +186,13 @@ pytest
 ```
 
 Default tests do not require Docker or live Redis. Graph/API tests use
-`fakeredis`; client HTTP tests mock `urlopen`; query-engine contract tests run
+`fakeredis`; client HTTP tests use an async HTTP transport; query-engine contract tests run
 against `NutmegGraph` directly.
 
 To prove the Python client against a live Nutmeg API backed by Redis:
 
 ```
-docker compose run --rm --build client-integration
+docker compose run --rm --build test-client-integration
 ```
 
 That Compose service starts Redis and the API, seeds unique test data through
@@ -238,3 +222,17 @@ One tool so far:
 | `get_node` | `node_id` | `{node_type, attributes, degree}` |
 
 Served over streamable HTTP at `http://127.0.0.1:3888`.
+
+## Layout
+
+All application code lives under `src/`; `main.py` and `mcp_main.py` at the repo
+root are the two obvious entry points that run it.
+
+- `main.py` -- run with `python main.py`.
+- `mcp_main.py` -- run with `python mcp_main.py`.
+- `src/graph.py` -- `NutmegGraph`, the async Redis-backed graph API.
+- `src/client.py` -- the async Python HTTP client and lazy query builder.
+- `src/api/server.py` -- the FastAPI HTTP app.
+- `src/api/query_engine.py` -- server-side execution for client query plans.
+- `src/mcp_server/server.py` -- the FastMCP server exposing the graph.
+- `tests/` -- pytest coverage for graph, API, MCP, client query building, query execution, and live integration.

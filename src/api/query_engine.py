@@ -67,7 +67,7 @@ class QueryExecutor:
 
     async def _validate_start_nodes(self, node_ids: list[str]) -> None:
         await asyncio.gather(
-            *(asyncio.to_thread(self.graph.get_node, node_id) for node_id in node_ids)
+            *(self.graph.get_node(node_id) for node_id in node_ids)
         )
 
     async def _execute_follow(
@@ -79,8 +79,7 @@ class QueryExecutor:
         source_nodes = values_by_stage[stage.sources[0]]
         edge_lists = await asyncio.gather(
             *(
-                asyncio.to_thread(
-                    self.graph.get_neighbors,
+                self.graph.get_neighbors(
                     source_node,
                     [stage.edge_type],
                     start=stage.start,
@@ -158,7 +157,7 @@ class QueryExecutor:
         nodes: dict[str, dict] = {}
         node_ids = list(metadata_requests)
         pulled_nodes = await asyncio.gather(
-            *(asyncio.to_thread(self.graph.get_node, node_id) for node_id in node_ids)
+            *(self.graph.get_node(node_id) for node_id in node_ids)
         )
         for node_id, node in zip(node_ids, pulled_nodes):
             flags = metadata_requests[node_id]

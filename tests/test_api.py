@@ -10,7 +10,7 @@ node_type is already a separate field, so an id like "ada:player" would just
 be repeating information the store already has.
 """
 
-import fakeredis
+import fakeredis.aioredis as fakeredis
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,7 +20,7 @@ from src.graph import NutmegGraph
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr(server, "graph", NutmegGraph(fakeredis.FakeStrictRedis()))
+    monkeypatch.setattr(server, "graph", NutmegGraph(fakeredis.FakeRedis()))
     return TestClient(server.app)
 
 

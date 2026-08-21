@@ -1,17 +1,15 @@
 """Server-side query execution over NutmegGraph."""
 
-import asyncio
-
-import fakeredis
+import fakeredis.aioredis as fakeredis
 import pytest
 
 from src.api.query_engine import QueryExecutor
-from src.client import Nutmeg
+from src.client import NutmegClient
 from src.graph import NutmegGraph
 
 
-def make_graph():
-    g = NutmegGraph(fakeredis.FakeStrictRedis())
+async def make_graph():
+    g = NutmegGraph(fakeredis.FakeRedis())
     for node_id in [
         "viewer",
         "alt_viewer",
@@ -23,7 +21,7 @@ def make_graph():
         "post1",
         "post2",
     ]:
-        g.add_node(node_id, "person", {"name": node_id})
+        await g.add_node(node_id, "person", {"name": node_id})
 
     for source, target, edge_type, score in [
         ("viewer", "alice", "connected_to", 10),
@@ -35,16 +33,16 @@ def make_graph():
         ("alice", "post1", "posted", 100),
         ("bob", "post2", "posted", 200),
     ]:
-        g.add_edge(source, target, edge_type, score=score)
+        await g.add_edge(source, target, edge_type, score=score)
     return g
 
 
-def execute(plan):
-    return asyncio.run(QueryExecutor(make_graph()).execute(plan))
+async def execute(plan):
+    return await QueryExecutor(await make_graph()).execute(plan)
 
 
-def test_follow_stage_uses_score_window_and_scores():
-    result = execute(
+async def test_follow_stage_uses_score_window_and_scores():
+    result = await execute(
         {
             "wire_version": 1,
             "start_nodes": ["viewer", "alt_viewer"],
@@ -71,20 +69,20 @@ def test_follow_stage_uses_score_window_and_scores():
     }
 
 
-def test_client_plan_executes_on_the_server():
-    query = Nutmeg("http://nutmeg.test").query("viewer")
+async def test_client_plan_executes_on_the_server():
+    query = NutmegClient("http://nutmeg.test").query("viewer")
     connected = query.follow_edges("connected_to", name="connected", scores=True)
     blocked = query.follow_edges("blocks", name="blocked")
     connected.subtract(blocked, name="visible", attributes=True)
 
-    result = execute(query.to_dict())
+    result = await execute(query.to_dict())
 
     assert result["stages"]["visible"] == ["alice", "bob", "cara"]
     assert "visible" not in result["scores"]
 
 
-def test_set_operations_preserve_left_hand_call_order_and_can_feed_follow_stage():
-    result = execute(
+async def test_set_operations_preserve_left_hand_call_order_and_can_feed_follow_stage():
+    result = await execute(
         {
             "wire_version": 1,
             "start_nodes": ["viewer"],
@@ -148,8 +146,8 @@ def test_set_operations_preserve_left_hand_call_order_and_can_feed_follow_stage(
     }
 
 
-def test_named_empty_stage_is_present_in_response():
-    result = execute(
+async def test_named_empty_stage_is_present_in_response():
+    result = await execute(
         {
             "wire_version": 1,
             "start_nodes": ["viewer"],
@@ -168,8 +166,8 @@ def test_named_empty_stage_is_present_in_response():
     assert result["stages"]["none"] == []
 
 
-def test_metadata_requests_union_across_stages():
-    result = execute(
+async def test_metadata_requests_union_across_stages():
+    result = await execute(
         {
             "wire_version": 1,
             "start_nodes": ["viewer"],
@@ -200,9 +198,9 @@ def test_metadata_requests_union_across_stages():
     }
 
 
-def test_invalid_query_plan_raises_value_error_before_execution():
+async def test_invalid_query_plan_raises_value_error_before_execution():
     with pytest.raises(ValueError, match="Unknown stage kind"):
-        execute(
+        await execute(
             {
                 "wire_version": 1,
                 "start_nodes": ["viewer"],
@@ -214,9 +212,9 @@ def test_invalid_query_plan_raises_value_error_before_execution():
         )
 
 
-def test_removed_max_edges_field_is_rejected_before_follow_execution():
+async def test_removed_max_edges_field_is_rejected_before_follow_execution():
     with pytest.raises(ValueError, match="Unknown stage fields"):
-        execute(
+        await execute(
             {
                 "wire_version": 1,
                 "start_nodes": ["viewer"],
@@ -234,9 +232,9 @@ def test_removed_max_edges_field_is_rejected_before_follow_execution():
         )
 
 
-def test_set_stage_scores_are_rejected_before_execution():
+async def test_set_stage_scores_are_rejected_before_execution():
     with pytest.raises(ValueError, match="cannot request scores"):
-        execute(
+        await execute(
             {
                 "wire_version": 1,
                 "start_nodes": ["viewer"],

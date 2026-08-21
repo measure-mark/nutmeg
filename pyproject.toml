@@ -5,7 +5,8 @@ description = "In-memory graph database backed by Redis"
 requires-python = ">=3.14"
 dependencies = [
     "redis",
-    "mcp",
+    "fastmcp",
+    "httpx",
     "fastapi",
     "uvicorn",
 ]
@@ -13,10 +14,11 @@ dependencies = [
 [project.optional-dependencies]
 # lupa is fakeredis's optional Lua backend -- needed so fakeredis can run the
 # EVAL/EVALSHA scripts NutmegGraph.delete_node uses for atomicity.
-dev = ["pytest", "fakeredis", "lupa"]
+dev = ["pytest", "pytest-asyncio", "fakeredis", "lupa"]
 
 [tool.pytest.ini_options]
 # The repo is imported with its root on sys.path (`from src...`).
 # Without this, pytest only puts tests/ on the path and collection fails.
 pythonpath = ["."]
 testpaths = ["tests"]
+asyncio_mode = "auto"
