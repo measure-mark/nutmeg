@@ -156,6 +156,30 @@ def test_get_neighbors_orders_by_score():
     assert g.get_neighbors("ada") == ["heat", "lakers", "cavaliers"]
 
 
+def test_get_neighbors_filters_by_inclusive_score_window():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player")
+    for node_id, score in [("heat", 2005), ("lakers", 2010), ("cavaliers", 2015)]:
+        g.add_node(node_id, "team")
+        g.add_edge("ada", node_id, "played_for", score=score)
+
+    assert g.get_neighbors("ada", ["played_for"], start=2010, end=2015) == [
+        "lakers",
+        "cavaliers",
+    ]
+
+
+def test_get_neighbors_can_return_scores_for_query_execution():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player")
+    g.add_node("heat", "team")
+    g.add_edge("ada", "heat", "played_for", score=2005)
+
+    assert g.get_neighbors("ada", ["played_for"], with_scores=True) == [
+        {"node_id": "heat", "score": 2005.0}
+    ]
+
+
 def test_get_neighbors_dedupes_to_lowest_score_across_edge_types():
     """A neighbor reachable via two edge_types keeps its earliest/lowest score for ordering."""
     g = NutmegGraph(fakeredis.FakeStrictRedis())

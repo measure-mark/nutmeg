@@ -16,6 +16,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from src.api.query_engine import QueryExecutor
 from src.graph import NutmegGraph
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -67,8 +68,23 @@ def get_degree(node_id: str, edge_type: str | None = None):
 
 
 @app.get("/nodes/{node_id}/neighbors")
-def get_neighbors(node_id: str, edge_types: list[str] = Query(default=[])) -> list[str]:
-    return graph.get_neighbors(node_id, edge_types)
+def get_neighbors(
+    node_id: str,
+    edge_types: list[str] = Query(default=[]),
+    start: float | None = None,
+    end: float | None = None,
+) -> list[str]:
+    return graph.get_neighbors(
+        node_id,
+        edge_types,
+        start=start,
+        end=end,
+    )
+
+
+@app.post("/queries/execute")
+async def execute_query(query_plan: dict) -> dict:
+    return await QueryExecutor(graph).execute(query_plan)
 
 
 @app.post("/edges", status_code=204)

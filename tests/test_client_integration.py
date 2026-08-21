@@ -1,7 +1,7 @@
-"""Live client test.
+"""Live client tests against Nutmeg API + Redis.
 
 Skipped unless NUTMEG_LIVE_URL is set. Docker Compose wires that env var for the
-client-integration service so this same test proves the client against Nutmeg + Redis.
+client-integration service so these prove the client against live Nutmeg + Redis.
 """
 
 import json
@@ -33,17 +33,48 @@ def _request(method, path, body=None):
 pytestmark = pytest.mark.skipif(not LIVE_URL, reason="set NUTMEG_LIVE_URL to run")
 
 
+def _seed_node(node_id, node_type="person"):
+    _request(
+        "POST",
+        "/nodes",
+        {"node_id": node_id, "node_type": node_type, "attributes": {"name": node_id}},
+    )
+
+
+def _seed_edge(source, target, edge_type, score):
+    _request(
+        "POST",
+        "/edges",
+        {
+            "source_node": source,
+            "target_node": target,
+            "edge_type": edge_type,
+            "score": score,
+        },
+    )
+
+
 def test_client_query_against_live_api_and_redis():
     prefix = f"it_{uuid4().hex}"
-    ada = f"{prefix}_ada"
-    bob = f"{prefix}_bob"
-    cara = f"{prefix}_cara"
-    dana = f"{prefix}_dana"
-    erin = f"{prefix}_erin"
+    nodes = {
+        name: f"{prefix}_{name}"
+        for name in [
+            "viewer",
+            "alt_viewer",
+            "alice",
+            "bob",
+            "cara",
+            "dana",
+            "erin",
+            "post1",
+            "post2",
+            "lonely",
+        ]
+    }
 
     for attempt in range(20):
         try:
-            _request("POST", "/nodes", {"node_id": ada, "node_type": "person"})
+            _seed_node(nodes["viewer"])
             break
         except HTTPError:
             raise
@@ -53,68 +84,82 @@ def test_client_query_against_live_api_and_redis():
             time.sleep(0.25)
 
     try:
-        for node_id, name in [
-            (bob, "Bob"),
-            (cara, "Cara"),
-            (dana, "Dana"),
-            (erin, "Erin"),
-        ]:
-            _request(
-                "POST",
-                "/nodes",
-                {
-                    "node_id": node_id,
-                    "node_type": "person",
-                    "attributes": {"name": name},
-                },
-            )
+        for name, node_id in nodes.items():
+            if name != "viewer":
+                _seed_node(node_id, "post" if name.startswith("post") else "person")
 
         for source, target, edge_type, score in [
-            (ada, bob, "connected_to", 1),
-            (ada, cara, "connected_to", 2),
-            (bob, dana, "connected_to", 1),
-            (cara, dana, "connected_to", 1),
-            (bob, erin, "blocks", 1),
+            ("viewer", "alice", "connected_to", 10),
+            ("viewer", "bob", "connected_to", 20),
+            ("viewer", "cara", "connected_to", 30),
+            ("viewer", "erin", "blocks", 5),
+            ("alt_viewer", "dana", "connected_to", 1),
+            ("alt_viewer", "bob", "connected_to", 15),
+            ("alice", "post1", "posted", 100),
+            ("bob", "post2", "posted", 200),
         ]:
-            _request(
-                "POST",
-                "/edges",
-                {
-                    "source_node": source,
-                    "target_node": target,
-                    "edge_type": edge_type,
-                    "score": score,
-                },
-            )
+            _seed_edge(nodes[source], nodes[target], edge_type, score)
 
         nutmeg = Nutmeg(LIVE_URL)
-        query = nutmeg.query(ada)
-        stage = query.follow_edges(
-            "connected_to", name="stage", attributes=True, degrees=True
+        query = nutmeg.query([nodes["viewer"], nodes["alt_viewer"]])
+        connected = query.follow_edges(
+            "connected_to",
+            name="connected",
+            start=10,
+            end=30,
+            attributes=True,
+            scores=True,
         )
-        stage2 = stage.follow_edges("connected_to", name="stage2", degrees=True)
-        stage2b = stage.follow_edges("blocks", name="stage2b")
-        query.collapse("stage", "stage2", name="connections")
+        blocked = query.follow_edges("blocks", name="blocked")
+        visible = connected.subtract(blocked, name="visible", degrees=True)
+        combined = visible.union(blocked, name="combined")
+        visible.intersect(combined, name="visible_again")
+        visible.symmetric_difference(blocked, name="changed")
+        combined.follow_edges("posted", name="posts", scores=True)
 
         result = query.execute()
 
-        assert result.stages["stage"] == [bob, cara]
-        assert result.stages["stage2"] == [dana]
-        assert result.stages["stage2b"] == [erin]
-        assert result.stages["connections"] == [bob, cara, dana]
-        assert result.nodes[bob] == {
-            "node_type": "person",
-            "attributes": {"name": "Bob"},
-            "degree": {"total": 2, "by_type": {"blocks": 1, "connected_to": 1}},
+        assert result.stages["connected"] == [
+            nodes["alice"],
+            nodes["bob"],
+            nodes["cara"],
+        ]
+        assert result.scores["connected"] == {
+            nodes["alice"]: 10.0,
+            nodes["bob"]: 15.0,
+            nodes["cara"]: 30.0,
         }
-        assert result.nodes[dana]["degree"] == {"total": 0, "by_type": {}}
-        assert set(query.get_nodes("connections")).isdisjoint(query.get_nodes("stage2b"))
+        assert result.stages["blocked"] == [nodes["erin"]]
+        assert result.stages["visible"] == [nodes["alice"], nodes["bob"], nodes["cara"]]
+        assert result.stages["combined"] == [
+            nodes["alice"],
+            nodes["bob"],
+            nodes["cara"],
+            nodes["erin"],
+        ]
+        assert result.stages["visible_again"] == [
+            nodes["alice"],
+            nodes["bob"],
+            nodes["cara"],
+        ]
+        assert result.stages["changed"] == [
+            nodes["alice"],
+            nodes["bob"],
+            nodes["cara"],
+            nodes["erin"],
+        ]
+        assert result.stages["posts"] == [nodes["post1"], nodes["post2"]]
+        assert result.nodes[nodes["bob"]] == {
+            "node_type": "person",
+            "attributes": {"name": nodes["bob"]},
+            "degree": {"total": 1, "by_type": {"posted": 1}},
+        }
 
         with pytest.raises(NutmegHTTPError) as exc:
             nutmeg.get_node(f"{prefix}_nope")
         assert exc.value.status_code == 400
     finally:
-        for node_id in [ada, bob, cara, dana, erin]:
+        for node_id in nodes.values():
             try:
                 _request("DELETE", f"/nodes/{node_id}")
             except Exception:

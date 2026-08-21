@@ -1,115 +1,24 @@
 # Nutmeg
 
-A simple typed graph database, backed by Redis, served over a small FastAPI HTTP layer.
+Nutmeg is a graph database using Redis for persistence, optimized for set
+operations and ordered traversal rather than path reconstruction.
 
-Nodes and edges are typed. Edges are directed, optionally carry a score (e.g. a
-timestamp, used for ordering) and free-form attributes. Out-edges live in Redis
-sorted sets, keyed per `(node, edge_type)`, so a node's neighbors always come back
-in score order.
+It is built for questions like “who can I see after subtracting blockers?” or
+“which nodes are in either of these traversals?” A query stage is a set of node
+ids. You branch, union, intersect, subtract, and continue traversing from those
+sets. Nutmeg intentionally returns compact stage results instead of full paths.
 
-See `CLAUDE.md` for the coding conventions this repo follows.
+## How Edges Are Stored
 
-## Layout
+Nodes are Redis hashes keyed by node id. Edges are directed and typed. Each
+out-edge set is a Redis sorted set keyed by `(source_node, edge_type)`, with the
+target node id as the member and the edge score as the sorted-set score.
 
-All application code lives under `src/`; `main.py` and `mcp_main.py` at the repo
-root are the two obvious entry points that run it.
+That sorted-set layout gives Nutmeg its query shape:
 
-- `main.py` — run with `python main.py`. Just a launcher: imports the FastAPI
-  app and hands it to uvicorn.
-- `mcp_main.py` — run with `python mcp_main.py`. Same pattern, for the MCP server.
-- `src/graph.py` — `NutmegGraph`, the core API (`add_node`, `get_node`, `add_edge`,
-  `get_degree`, `get_neighbors`, `delete_edge`, `delete_node`). Talks to Redis
-  directly; no ORM, no in-memory layer yet.
-- `src/client.py` — a small standard-library HTTP client plus a traversal query
-  builder. Query plans are DAGs and execute in topological order.
-- `src/keys.py` — the Redis key-naming scheme, in one place.
-- `src/api/server.py` — a FastAPI app that exposes `NutmegGraph` over HTTP.
-- `src/mcp_server/server.py` — an MCP server exposing the graph to model clients.
-  Just `get_node()` for now -- enough to prove the infrastructure (container,
-  port, transport) works end to end. Named `mcp_server`, not `mcp`, so it
-  doesn't shadow the `mcp` SDK package this project also depends on.
-- `tests/` — pytest coverage for the graph, API, MCP layer, client query DAG, and
-  optional live client integration.
-
-## Quickstart
-
-### Docker (recommended)
-
-```
-docker compose up -d
-```
-
-This starts Redis, the API, and the MCP server:
-
-- API: `http://127.0.0.1:3879`
-- MCP server (streamable-http): `http://127.0.0.1:3888`
-- Redis: `127.0.0.1:6380` for host tools like `redis-cli` (not 6379 -- nba's
-  docker-compose already binds that port for its own Redis on this machine)
-
-```
-curl -X POST http://127.0.0.1:3879/nodes \
-  -H 'Content-Type: application/json' \
-  -d '{"node_id": "ada", "node_type": "player", "attributes": {"name": "Ada"}}'
-```
-
-Node ids are plain, globally-unique strings (e.g. `ada`, `celtics`) -- `node_type` is
-already a separate field, so an id shouldn't repeat it (e.g. `player:ada`).
-
-### Local (conda env)
-
-```
-conda env create -f environment.yml   # once
-conda activate nutmeg
-REDIS_URL=redis://localhost:6380/0 python main.py         # API on :3879
-REDIS_URL=redis://localhost:6380/0 python mcp_main.py     # MCP server on :3888
-```
-
-For autoreload on the API during development, run uvicorn directly instead --
-reload needs an import-string target, which `main.py` doesn't give it:
-
-```
-REDIS_URL=redis://localhost:6380/0 uvicorn src.api.server:app --reload --port 3879
-```
-
-`REDIS_URL` defaults to `redis://localhost:6379/0` if unset -- override it if your
-Redis isn't on the default port (e.g. when nutmeg's Redis is running on 6380
-alongside another project's Redis on 6379). `API_PORT`/`MCP_PORT` default to
-`3879`/`3888` and only need overriding if those are taken too.
-
-## Tests
-
-```
-conda activate nutmeg
-pytest
-```
-
-Default tests do not require Docker or live Redis. Graph/API tests use
-`fakeredis`, client HTTP tests use a tiny stdlib HTTP server, and the live
-client integration test is skipped unless `NUTMEG_LIVE_URL` is set.
-
-To prove the Python client against a live Nutmeg API backed by Redis:
-
-```
-docker compose up -d --build api
-docker compose run --rm --build client-integration
-```
-
-That Compose service starts Redis and the API, seeds unique test data through
-HTTP, runs `tests/test_client_integration.py`, and deletes the test nodes.
-
-## API
-
-| Method | Path | Body / Params |
-| --- | --- | --- |
-| `POST` | `/nodes` | `{node_id, node_type, attributes}` |
-| `GET` | `/nodes/{node_id}` | -- |
-| `DELETE` | `/nodes/{node_id}` | -- |
-| `GET` | `/nodes/{node_id}/degree` | `?edge_type=` (optional) |
-| `GET` | `/nodes/{node_id}/neighbors` | `?edge_types=` (repeatable, optional) |
-| `POST` | `/edges` | `{source_node, target_node, edge_type, attributes, score}` |
-| `DELETE` | `/edges` | `?source_node=&target_node=&edge_type=` |
-
-All writes are idempotent. Interactive docs are at `/docs` once the server is running.
+- neighbors come back in score order
+- `start` and `end` are inclusive score bounds
+- duplicate targets reached through multiple sources keep their best, lowest score
 
 ## Python Client
 
@@ -123,86 +32,202 @@ nutmeg = Nutmeg("http://127.0.0.1:3879")
 node = nutmeg.get_node("ada")
 degree = nutmeg.get_degree("ada")
 plays_for_degree = nutmeg.get_degree("ada", "plays_for")
-neighbors = nutmeg.get_neighbors("ada", ["connected_to"])
+neighbors = nutmeg.get_neighbors("ada", ["connected_to"], start=10, end=20)
 ```
 
-### Traversal Queries
+## Server-Side Queries
 
-Queries start from one node id or a list of node ids. Each `follow_edges()` call
-creates a new stage from the stage it was called on; `follow_edge()` is an alias.
-Stages can branch naturally because earlier stage handles stay usable. `collapse()`
-unions earlier stage results, preserving first-seen order.
-
-Python cannot see the variable name on the left side of an assignment, so pass
-`name=` for stages you want to fetch by name later.
+Queries are lazy. The client builds a query plan locally, then `execute()` sends
+the whole plan to `POST /queries/execute`. Nutmeg executes the traversal on the
+server against Redis and returns one packed response.
 
 ```python
-from src.client import Nutmeg
-
 nutmeg = Nutmeg("http://127.0.0.1:3879")
 
 query = nutmeg.query("ada")
-stage = query.follow_edges("connected_to", name="stage", attributes=True)
-stage2 = stage.follow_edge("connected_to", name="stage2", degrees=True)
-stage2b = stage.follow_edges("blocks", name="stage2b")
-stage3 = stage2.follow_edge("connected_to", name="stage3")
-connections = query.collapse("stage", "stage2", "stage3", name="connections")
-
-# Collapsed stages are regular stages, so they can be followed too.
-connections.follow_edges("connected_to", name="connections_next")
+connected = query.follow_edges(
+    "connected_to",
+    name="connected",
+    start=1700000000,
+    end=1800000000,
+    attributes=True,
+    scores=True,
+)
+blocked = query.follow_edges("blocks", name="blocked")
+visible = connected.subtract(blocked, name="visible", degrees=True)
 
 result = query.execute()
 
-all_connections = query.get_nodes("connections")
-blocked = query.get_nodes(stage2b)
-connections_i_can_see = set(all_connections) - set(blocked)
+visible_ids = result.get_nodes("visible")
+connected_scores = result.get_scores("connected")
+bob = result.nodes["bob"]
 ```
 
-If you omit `name=`, follow stages are named `stage`, `stage2`, `stage3`, and so
-on. Collapses are named `connections`, `connections2`, and so on.
+`follow_edge()` is an alias for `follow_edges()`.
 
-`degrees=True` and `attributes=True` are stage-local. Only nodes in stages that
-request metadata are included in the `nodes` section. Node records always include
-`node_type`; they include `attributes` and `degree` only when requested by at
-least one stage containing that node.
+## Set Operations
 
-The result payload is compact JSON:
+Set operations are stages too, so you can keep traversing from them.
+
+```python
+query = nutmeg.query("viewer")
+
+friends = query.follow_edges("connected_to", name="friends")
+teammates = query.follow_edges("teammate_of", name="teammates")
+blocked = query.follow_edges("blocks", name="blocked")
+
+network = friends.union(teammates, name="network")
+visible_network = network.subtract(blocked, name="visible_network")
+mutuals = friends.intersect(teammates, name="mutuals")
+only_one_group = friends.symmetric_difference(teammates, name="only_one_group")
+
+posts = visible_network.follow_edges("posted", name="posts", attributes=True)
+
+result = query.execute()
+```
+
+Set operations are binary. Chain them when you need more than two inputs:
+`a.union(b).union(c)`. Ordering is defined by the call:
+
+- `a.union(b)` keeps `a` order, then appends `b` nodes not already present
+- `a.intersect(b)` keeps `a` order for nodes also present in `b`
+- `a.subtract(b)` keeps `a` order after removing `b`
+- `a.symmetric_difference(b)` returns `a`-only in `a` order, then `b`-only in `b` order
+
+Set-operation stages do not have scores; `scores=True` is only valid on traversal
+stages created by `follow_edges()`.
+
+## Response Shape
+
+The response keeps stage outputs compact:
 
 ```json
 {
+  "wire_version": 1,
   "stages": {
     "start_stage": ["ada"],
-    "stage": ["bob", "cara"],
-    "stage2": ["dana"],
-    "stage2b": ["erin"],
-    "connections": ["bob", "cara", "dana"]
+    "connected": ["bob", "cara"],
+    "blocked": ["erin"],
+    "visible": ["bob", "cara"]
   },
   "nodes": {
-    "bob": {"node_type": "person", "attributes": {"name": "Bob"}},
-    "dana": {"node_type": "person", "degree": {"total": 0, "by_type": {}}}
+    "bob": {
+      "node_type": "person",
+      "attributes": {"name": "Bob"},
+      "degree": {"total": 1, "by_type": {"posted": 1}}
+    }
+  },
+  "scores": {
+    "connected": {"bob": 10.0, "cara": 20.0}
   }
 }
 ```
 
-Query plans and results both round-trip cleanly:
+`stages` are always lists of node ids. `nodes` contains only metadata requested
+by stages with `attributes=True` or `degrees=True`. `scores` is present only for
+traversal stages with `scores=True`; set-operation stages never emit scores.
+
+Query plans and results round-trip cleanly:
 
 ```python
 from src.client import QueryResult
 
 saved_query = query.to_json()
 query = nutmeg.query_from_json(saved_query)
+
 saved_result = result.to_json()
 result = QueryResult.from_json(saved_result)
 ```
 
-Execution uses a topological sort over the query DAG. Loading a malformed plan
-with a missing dependency or cycle raises `ValueError` before any HTTP traversal
-calls are made.
+## Layout
 
-The v1 query executor uses the existing per-node HTTP API: a follow stage makes
-one neighbor request per node in its source stage, and metadata collection makes
-one node request per node that needs attributes or degree information. That keeps
-the client small, but large traversals will want future batch endpoints.
+All application code lives under `src/`; `main.py` and `mcp_main.py` at the repo
+root are the two obvious entry points that run it.
+
+- `main.py` -- run with `python main.py`. Imports the FastAPI app and hands it to uvicorn.
+- `mcp_main.py` -- run with `python mcp_main.py`. Same pattern, for the MCP server.
+- `src/graph.py` -- `NutmegGraph`, the core Redis-backed graph API.
+- `src/client.py` -- the Python HTTP client and lazy query builder.
+- `src/api/server.py` -- the FastAPI HTTP app.
+- `src/api/query_engine.py` -- server-side execution for client query plans.
+- `src/mcp_server/server.py` -- an MCP server exposing the graph to model clients.
+- `tests/` -- pytest coverage for graph, API, MCP, client query building, query execution, and live client integration.
+
+## Quickstart
+
+### Docker
+
+```
+docker compose up -d
+```
+
+This starts Redis, the API, and the MCP server:
+
+- API: `http://127.0.0.1:3879`
+- MCP server: `http://127.0.0.1:3888`
+- Redis: `127.0.0.1:6380` for host tools like `redis-cli`
+
+```
+curl -X POST http://127.0.0.1:3879/nodes \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id": "ada", "node_type": "player", "attributes": {"name": "Ada"}}'
+```
+
+Node ids are plain, globally unique strings. `node_type` is already a separate
+field, so an id should not repeat it.
+
+### Local
+
+```
+conda env create -f environment.yml
+conda activate nutmeg
+REDIS_URL=redis://localhost:6380/0 python main.py
+REDIS_URL=redis://localhost:6380/0 python mcp_main.py
+```
+
+For API autoreload:
+
+```
+REDIS_URL=redis://localhost:6380/0 uvicorn src.api.server:app --reload --port 3879
+```
+
+`REDIS_URL` defaults to `redis://localhost:6379/0`. `API_PORT` and `MCP_PORT`
+default to `3879` and `3888`.
+
+## Tests
+
+```
+conda activate nutmeg
+pytest
+```
+
+Default tests do not require Docker or live Redis. Graph/API tests use
+`fakeredis`; client HTTP tests mock `urlopen`; query-engine contract tests run
+against `NutmegGraph` directly.
+
+To prove the Python client against a live Nutmeg API backed by Redis:
+
+```
+docker compose run --rm --build client-integration
+```
+
+That Compose service starts Redis and the API, seeds unique test data through
+HTTP, runs `tests/test_client_integration.py`, and deletes the test nodes.
+
+## API
+
+| Method | Path | Body / Params |
+| --- | --- | --- |
+| `POST` | `/nodes` | `{node_id, node_type, attributes}` |
+| `GET` | `/nodes/{node_id}` | -- |
+| `DELETE` | `/nodes/{node_id}` | -- |
+| `GET` | `/nodes/{node_id}/degree` | `?edge_type=` optional |
+| `GET` | `/nodes/{node_id}/neighbors` | `?edge_types=&start=&end=` optional |
+| `POST` | `/queries/execute` | serialized client query plan |
+| `POST` | `/edges` | `{source_node, target_node, edge_type, attributes, score}` |
+| `DELETE` | `/edges` | `?source_node=&target_node=&edge_type=` |
+
+All writes are idempotent. Interactive docs are at `/docs` once the server is running.
 
 ## MCP
 
@@ -212,5 +237,4 @@ One tool so far:
 | --- | --- | --- |
 | `get_node` | `node_id` | `{node_type, attributes, degree}` |
 
-Served over streamable-http, not stdio, so it's reachable as a network service
-at `http://127.0.0.1:3888` rather than needing to be spawned as a local subprocess.
+Served over streamable HTTP at `http://127.0.0.1:3888`.

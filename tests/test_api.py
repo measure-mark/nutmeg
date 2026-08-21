@@ -71,6 +71,63 @@ def test_get_neighbors_filters_by_edge_type(client):
     assert response.json() == ["celtics"]
 
 
+def test_get_neighbors_accepts_score_window(client):
+    client.post("/nodes", json={"node_id": "ada", "node_type": "player"})
+    for node_id, score in [("heat", 2005), ("lakers", 2010), ("cavaliers", 2015)]:
+        client.post("/nodes", json={"node_id": node_id, "node_type": "team"})
+        client.post(
+            "/edges",
+            json={
+                "source_node": "ada",
+                "target_node": node_id,
+                "edge_type": "played_for",
+                "score": score,
+            },
+        )
+
+    response = client.get(
+        "/nodes/ada/neighbors",
+        params={"edge_types": ["played_for"], "start": 2010, "end": 2015},
+    )
+
+    assert response.json() == ["lakers", "cavaliers"]
+
+
+def test_execute_query_runs_server_side(client):
+    for node_id in ["ada", "bob"]:
+        client.post("/nodes", json={"node_id": node_id, "node_type": "person"})
+    client.post(
+        "/edges",
+        json={"source_node": "ada", "target_node": "bob", "edge_type": "connected_to"},
+    )
+
+    response = client.post(
+        "/queries/execute",
+        json={
+            "wire_version": 1,
+            "start_nodes": ["ada"],
+            "stage_specs": [
+                {"name": "start_stage", "kind": "start"},
+                {
+                    "name": "connected",
+                    "kind": "follow",
+                    "sources": ["start_stage"],
+                    "edge_type": "connected_to",
+                    "attributes": True,
+                    "scores": True,
+                },
+            ],
+        },
+    )
+
+    assert response.json() == {
+        "wire_version": 1,
+        "stages": {"start_stage": ["ada"], "connected": ["bob"]},
+        "nodes": {"bob": {"node_type": "person", "attributes": {}}},
+        "scores": {"connected": {"bob": 0.0}},
+    }
+
+
 def test_delete_edge_then_degree_drops_to_zero(client):
     client.post("/nodes", json={"node_id": "ada", "node_type": "player"})
     client.post("/nodes", json={"node_id": "celtics", "node_type": "team"})

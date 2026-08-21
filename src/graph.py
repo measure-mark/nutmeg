@@ -258,12 +258,21 @@ class NutmegGraph:
         }
         return {"total": sum(by_type.values()), "by_type": by_type}
 
-    def get_neighbors(self, node_id: str, edge_types: list[str] | None = None) -> list[str]:
+    def get_neighbors(
+        self,
+        node_id: str,
+        edge_types: list[str] | None = None,
+        *,
+        start: float | None = None,
+        end: float | None = None,
+        with_scores: bool = False,
+    ) -> list:
         """Out-neighbors ordered by score ascending -- the zsets' native order, which is
         the whole reason we store edges in one. A neighbor reachable via more than one
         edge_type is deduped to its lowest score. Ties (e.g. the default score of 0)
         break by node_id, since edge_types can come back from a Redis SET whose
         iteration order isn't guaranteed. Empty/None edge_types means all types.
+        start/end are inclusive score bounds.
 
         Raises ValueError if node_id/edge_types is malformed or the node hasn't been added.
         """
@@ -275,13 +284,21 @@ class NutmegGraph:
 
         types = edge_types or _decode_set(self._r.smembers(keys.edge_types_key(node_id)))
         best_score: dict[str, float] = {}
+        min_score = "-inf" if start is None else start
+        max_score = "+inf" if end is None else end
 
-        # TODO--this rescoring is bad it should just be a merged set, but we wont' worry abotu that
-        # for now
         for edge_type in types:
-            scored = self._r.zrange(keys.edges_key(node_id, edge_type), 0, -1, withscores=True)
+            scored = self._r.zrangebyscore(
+                keys.edges_key(node_id, edge_type),
+                min_score,
+                max_score,
+                withscores=True,
+            )
             for member, score in scored:
                 neighbor = member.decode()
                 if neighbor not in best_score or score < best_score[neighbor]:
                     best_score[neighbor] = score
-        return [neighbor for neighbor, _ in sorted(best_score.items(), key=lambda kv: (kv[1], kv[0]))]
+        ordered = sorted(best_score.items(), key=lambda kv: (kv[1], kv[0]))
+        if with_scores:
+            return [{"node_id": neighbor, "score": score} for neighbor, score in ordered]
+        return [neighbor for neighbor, _ in ordered]
