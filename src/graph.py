@@ -162,6 +162,23 @@ class NutmegGraph:
             mapping={"node_type": node_type, "attributes": json.dumps(attributes or {})},
         )
 
+    def get_node(self, node_id: str) -> dict:
+        """A node's type, attributes, and out-degree in one call. Reuses get_degree
+        rather than re-deriving it, at the cost of one extra (cheap) EXISTS check.
+
+        Raises ValueError if node_id is malformed or the node hasn't been added.
+        """
+        _check_identifier(node_id, "node_id")
+        node = self._r.hgetall(keys.node_key(node_id))
+        if not node:
+            raise ValueError(f"node {node_id!r} does not exist")
+
+        return {
+            "node_type": node[b"node_type"].decode(),
+            "attributes": json.loads(node[b"attributes"]),
+            "degree": self.get_degree(node_id),
+        }
+
     def delete_node(self, node_id: str) -> None:
         """Remove a node, its out-edges, and (best-effort) its in-edges. No-op if absent.
 

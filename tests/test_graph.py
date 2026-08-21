@@ -33,6 +33,25 @@ def test_add_node_overwrites_on_conflicting_call():
     assert r.hget("nutmeg:nodes:ada", "attributes") == b'{"name": "Ada Lovelace"}'
 
 
+def test_get_node_returns_type_attributes_and_degree():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    g.add_node("ada", "player", {"name": "Ada"})
+    g.add_node("celtics", "team")
+    g.add_edge("ada", "celtics", "plays_for")
+
+    assert g.get_node("ada") == {
+        "node_type": "player",
+        "attributes": {"name": "Ada"},
+        "degree": {"total": 1, "by_type": {"plays_for": 1}},
+    }
+
+
+def test_get_node_raises_if_node_does_not_exist():
+    g = NutmegGraph(fakeredis.FakeStrictRedis())
+    with pytest.raises(ValueError):
+        g.get_node("ghost")
+
+
 def test_add_edge_creates_out_edge_and_degree():
     g = NutmegGraph(fakeredis.FakeStrictRedis())
     g.add_node("ada", "player")

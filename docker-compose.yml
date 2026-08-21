@@ -1,17 +1,17 @@
-services:
-  app-base: &app-build
-    build:
-      context: .
-      dockerfile_inline: |
-        FROM python:3.14-slim
-        WORKDIR /app
-        COPY pyproject.toml ./
-        RUN pip install --no-cache-dir redis mcp fastapi uvicorn
-        COPY src/ ./src/
-        COPY main.py ./
-        ENV PYTHONPATH=/app \
-            PYTHONUNBUFFERED=1
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile_inline: |
+      FROM python:3.14-slim
+      WORKDIR /app
+      COPY pyproject.toml ./
+      RUN pip install --no-cache-dir redis mcp fastapi uvicorn
+      COPY src/ ./src/
+      COPY main.py mcp_main.py ./
+      ENV PYTHONPATH=/app \
+          PYTHONUNBUFFERED=1
 
+services:
   redis:
     # TODO, this should be redis 8.10
     image: redis:8-alpine
@@ -36,11 +36,22 @@ services:
     command: ["python", "main.py"]
     environment:
       REDIS_URL: redis://redis:6379/0
+      API_PORT: "3879"
     ports:
-      # Host port 8000 is already in use locally by something unrelated to nba or
-      # nutmeg, so this is published on 8001 instead. The container still listens
-      # on the standard 8000.
-      - "127.0.0.1:8001:8000"
+      - "127.0.0.1:3879:3879"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mcp:
+    <<: *app-build
+    command: ["python", "mcp_main.py"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MCP_PORT: "3888"
+    ports:
+      - "127.0.0.1:3888:3888"
     depends_on:
       redis:
         condition: service_healthy
