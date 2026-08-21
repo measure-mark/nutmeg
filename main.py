@@ -10,9 +10,11 @@ target, not an app object, so it can't be driven from here:
     uvicorn src.api.server:app --reload
 """
 
+import os
+
 import uvicorn
 
 from src.api.server import app
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("API_PORT", 3879)))

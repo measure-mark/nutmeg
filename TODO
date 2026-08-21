@@ -8,3 +8,67 @@
 4. unit tests with fakearedis are useless, we need integration tests
 
 5.  How do we handle lost conections with redis?
+
+--- from code review, client branch (see CLAUDE-review.md STATUS section) ---
+Blocking items are all fixed; these are what's left. Pinned for now.
+
+6.  README.md:25 still claims the client "has no third-party runtime dependency"
+    It imports httpx, which is a required dep in pyproject.toml. Just false now.
+
+7.  Edge attributes: zero test coverage AND no read path
+    Nothing in get_neighbors, no HTTP route, nothing in the query engine reads them.
+    They are write-only state. The _ADD_EDGE_LUA SET/DEL branch is never exercised,
+    including "re-add without attributes clears the old ones".
+    Decision first (add a reader, or drop the parameter), then tests.
+
+8.  query_engine._collect_nodes computes degree it throws away
+    Calls graph.get_node, which always computes degree, then discards it unless
+    degrees was requested. A stage asking only for attributes pays the full
+    EXISTS + SMEMBERS + ZCARD-per-edge-type cost for nothing. Cheapest perf win.
+
+9.  Engine validates its own output on every request (query_engine.py:53)
+    Builds a QueryResult, to_dict()s it, re-parses it through load_query_response,
+    to_dict()s it again. Re-isinstance-checks every node id on the hot path, on data
+    it just built. Drop it or put it behind a debug flag.
+
+10. _topological_stage_levels builds the dependency graph twice
+    Calls topological_stage_names() for its cycle check, discards the result, then
+    rebuilds identical indegree/dependents dicts and re-runs Kahn's. One function
+    returning levels removes ~20 lines and half the work.
+
+11. Client polish (all in src/client.py)
+    - :309 arity check is unreachable, every caller passes a literal 2-tuple
+    - the trailing `.query` needed to run a chain (see tests/test_client.py:204) --
+      put execute()/to_dict() on Stage, or return self.query from a terminal method
+    - the four set methods aren't keyword-only, unlike follow_edges
+    - NutmegQuery.execute reaches into client._request
+
+12. QueryResult.get_nodes raises bare KeyError, get_scores returns {}
+    Pick one. KeyError naming the available stages is friendlier for both.
+
+13. Engine does set math in Python, not in Redis
+    ZUNIONSTORE/ZINTERSTORE/SDIFF never appear -- _execute_set_op materializes every
+    stage as a full Python list in server memory. Defensible v1 (results must be
+    ordered anyway) but the README's "optimized for set operations" describes the
+    zset storage layer, not the engine. Fix the engine or soften the README.
+
+14. _execute_follow fan-out is uncapped and unpipelined
+    One get_neighbors per source node concurrently, each awaiting one zrangebyscore
+    per edge type sequentially. A follow over 10k nodes is 10k concurrent round trips,
+    no pipelining, no semaphore. First thing to fall over on real data.
+    Related: no bound on plan size at /queries/execute, so one posted plan can
+    saturate the connection pool.
+
+15. Remaining query_wire validation rules with no test
+    tests/test_query_wire.py covers most of them now. Still unexercised: duplicate
+    stage names, zero/two start stages, set kinds with one or three sources,
+    non-follow stages carrying edge_type or score bounds, non-boolean flags.
+    Cheap rows to add to the parametrize table that already exists.
+
+16. Two test-naming/coverage nits
+    - test_set_operations_handle_overlapping_and_empty_inputs doesn't test overlapping
+      inputs (left={alice,bob,cara}, right={erin} -- disjoint). The empty half is real;
+      rename to ..._handle_empty_results.
+    - symmetric_difference has both extremes tested (disjoint -> everything, identical
+      -> []) but not partial overlap, the only case exercising exclusion AND ordering
+      together, and the shape real queries take.
