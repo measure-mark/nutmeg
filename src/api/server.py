@@ -56,6 +56,11 @@ def delete_node(node_id: str) -> None:
     graph.delete_node(node_id)
 
 
+@app.get("/nodes/{node_id}")
+def get_node(node_id: str) -> dict:
+    return graph.get_node(node_id)
+
+
 @app.get("/nodes/{node_id}/degree")
 def get_degree(node_id: str, edge_type: str | None = None):
     return graph.get_degree(node_id, edge_type)

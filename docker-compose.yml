@@ -42,6 +42,17 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3879/docs', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   mcp:
@@ -56,6 +67,28 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+
+  client-integration:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.14-slim
+        WORKDIR /app
+        COPY pyproject.toml ./
+        RUN pip install --no-cache-dir redis mcp fastapi uvicorn pytest
+        COPY src/ ./src/
+        COPY tests/ ./tests/
+        ENV PYTHONPATH=/app \
+            PYTHONUNBUFFERED=1
+    command: ["python", "-m", "pytest", "tests/test_client_integration.py"]
+    profiles: ["test"]
+    environment:
+      NUTMEG_LIVE_URL: http://api:3879
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
 volumes:
   redis-data:

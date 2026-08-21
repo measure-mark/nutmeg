@@ -40,6 +40,19 @@ def test_add_node_then_add_edge_then_degree(client):
     assert client.get("/nodes/ada/degree", params={"edge_type": "plays_for"}).json() == 1
 
 
+def test_get_node_returns_node_document(client):
+    client.post(
+        "/nodes",
+        json={"node_id": "ada", "node_type": "player", "attributes": {"name": "Ada"}},
+    )
+
+    assert client.get("/nodes/ada").json() == {
+        "node_type": "player",
+        "attributes": {"name": "Ada"},
+        "degree": {"total": 0, "by_type": {}},
+    }
+
+
 def test_get_neighbors_filters_by_edge_type(client):
     client.post("/nodes", json={"node_id": "ada", "node_type": "player"})
     client.post("/nodes", json={"node_id": "celtics", "node_type": "team"})
