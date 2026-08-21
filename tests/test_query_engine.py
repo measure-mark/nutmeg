@@ -212,7 +212,18 @@ async def test_invalid_query_plan_raises_value_error_before_execution():
         )
 
 
-async def test_removed_max_edges_field_is_rejected_before_follow_execution():
+async def test_nonexistent_start_node_is_rejected_before_execution():
+    with pytest.raises(ValueError, match="does not exist"):
+        await execute(
+            {
+                "wire_version": 1,
+                "start_nodes": ["ghost"],
+                "stage_specs": [{"name": "start_stage", "kind": "start"}],
+            }
+        )
+
+
+async def test_unknown_wire_fields_are_rejected_before_follow_execution():
     with pytest.raises(ValueError, match="Unknown stage fields"):
         await execute(
             {
@@ -261,3 +272,73 @@ async def test_set_stage_scores_are_rejected_before_execution():
                 ],
             }
         )
+
+
+async def test_set_operations_handle_overlapping_and_empty_inputs():
+    result = await execute(
+        {
+            "wire_version": 1,
+            "start_nodes": ["viewer"],
+            "stage_specs": [
+                {"name": "start_stage", "kind": "start"},
+                {
+                    "name": "left",
+                    "kind": "follow",
+                    "sources": ["start_stage"],
+                    "edge_type": "connected_to",
+                },
+                {
+                    "name": "right",
+                    "kind": "follow",
+                    "sources": ["start_stage"],
+                    "edge_type": "blocks",
+                },
+                {"name": "unioned", "kind": "union", "sources": ["left", "right"]},
+                {
+                    "name": "symmetric",
+                    "kind": "symmetric_difference",
+                    "sources": ["left", "right"],
+                },
+                {"name": "intersection", "kind": "intersect", "sources": ["left", "right"]},
+                {"name": "empty", "kind": "subtract", "sources": ["left", "left"]},
+            ],
+        }
+    )
+
+    assert result["stages"]["unioned"] == ["alice", "bob", "cara", "erin"]
+    assert result["stages"]["symmetric"] == ["alice", "bob", "cara", "erin"]
+    assert result["stages"]["intersection"] == []
+    assert result["stages"]["empty"] == []
+
+
+async def test_symmetric_difference_excludes_nodes_present_in_both_inputs():
+    result = await execute(
+        {
+            "wire_version": 1,
+            "start_nodes": ["viewer"],
+            "stage_specs": [
+                {"name": "start_stage", "kind": "start"},
+                {
+                    "name": "left",
+                    "kind": "follow",
+                    "sources": ["start_stage"],
+                    "edge_type": "connected_to",
+                },
+                {
+                    "name": "same",
+                    "kind": "follow",
+                    "sources": ["start_stage"],
+                    "edge_type": "connected_to",
+                },
+                {"name": "unioned", "kind": "union", "sources": ["left", "same"]},
+                {
+                    "name": "symmetric",
+                    "kind": "symmetric_difference",
+                    "sources": ["left", "same"],
+                },
+            ],
+        }
+    )
+
+    assert result["stages"]["unioned"] == ["alice", "bob", "cara"]
+    assert result["stages"]["symmetric"] == []

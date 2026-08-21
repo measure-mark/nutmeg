@@ -7,7 +7,7 @@ from collections import Counter, deque
 from typing import Any
 
 from src.graph import NutmegGraph
-from src.query_plan import QueryStage, load_query_plan, topological_stage_names
+from src.query_wire import QueryStage, load_query_wire, topological_stage_names
 from src.query_response import QueryResult, load_query_response
 
 
@@ -16,7 +16,7 @@ class QueryExecutor:
         self.graph = graph
 
     async def execute(self, query_plan: dict[str, Any]) -> dict[str, Any]:
-        plan = load_query_plan(query_plan)
+        plan = load_query_wire(query_plan)
         stages = plan.stages
         start_nodes = plan.start_nodes
 

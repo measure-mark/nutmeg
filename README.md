@@ -232,6 +232,7 @@ root are the two obvious entry points that run it.
 - `mcp_main.py` -- run with `python mcp_main.py`.
 - `src/graph.py` -- `NutmegGraph`, the async Redis-backed graph API.
 - `src/client.py` -- the async Python HTTP client and lazy query builder.
+- `src/query_wire.py` -- the shared query wire format and validation used by both sides.
 - `src/api/server.py` -- the FastAPI HTTP app.
 - `src/api/query_engine.py` -- server-side execution for client query plans.
 - `src/mcp_server/server.py` -- the FastMCP server exposing the graph.

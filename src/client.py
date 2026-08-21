@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any
 import httpx
 
+from src.query_wire import QueryStage, load_query_wire
 from src.query_response import QueryResult, load_query_response
 
 
@@ -112,35 +112,6 @@ class NutmegClient:
         return response.json() if response.content else None
 
 
-# Backwards-compatible import for clients migrating to the explicit name.
-Nutmeg = NutmegClient
-
-
-@dataclass(frozen=True)
-class _StageSpec:
-    name: str
-    kind: str
-    sources: tuple[str, ...] = ()
-    edge_type: str | None = None
-    start: float | None = None
-    end: float | None = None
-    degrees: bool = False
-    attributes: bool = False
-    scores: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        data = {"name": self.name, "kind": self.kind}
-        if self.sources:
-            data["sources"] = list(self.sources)
-        for field in ("edge_type", "start", "end"):
-            if getattr(self, field) is not None:
-                data[field] = getattr(self, field)
-        for field in ("degrees", "attributes", "scores"):
-            if getattr(self, field):
-                data[field] = True
-        return data
-
-
 class Stage:
     def __init__(self, query: "NutmegQuery", name: str):
         self.query = query
@@ -243,8 +214,8 @@ class NutmegQuery:
         self.start_nodes = list(dict.fromkeys(_as_node_list(start_nodes)))
         if not self.start_nodes:
             raise ValueError("query must contain at least one start node")
-        self._stages: dict[str, _StageSpec] = {
-            name: _StageSpec(
+        self._stages: dict[str, QueryStage] = {
+            name: QueryStage(
                 name=name,
                 kind="start",
                 degrees=degrees,
@@ -259,8 +230,9 @@ class NutmegQuery:
 
     async def execute(self) -> "QueryResult":
         payload = self.to_dict()
+        wire = load_query_wire(payload)
         response = await self.client._request("POST", "/queries/execute", body=payload)
-        self._result = load_query_response(response)
+        self._result = load_query_response(response, plan=wire)
         return self._result
 
     def get_nodes(self, stage: str | Stage) -> list[str]:
@@ -285,21 +257,10 @@ class NutmegQuery:
 
     @classmethod
     def from_dict(cls, client: NutmegClient, data: dict[str, Any]) -> "NutmegQuery":
-        start_nodes = list(dict.fromkeys(data["start_nodes"]))
-        specs = [_StageSpec(
-            name=spec["name"],
-            kind=spec["kind"],
-            sources=tuple(spec.get("sources", ())),
-            edge_type=spec.get("edge_type"),
-            start=spec.get("start"),
-            end=spec.get("end"),
-            degrees=spec.get("degrees", False),
-            attributes=spec.get("attributes", False),
-            scores=spec.get("scores", False),
-        ) for spec in data["stage_specs"]]
-        start_stage = next(stage for stage in specs if stage.kind == "start")
-        query = cls(client, start_nodes, name=start_stage.name)
-        query._stages = {spec.name: spec for spec in specs}
+        wire = load_query_wire(data)
+        start_stage = next(stage for stage in wire.stages.values() if stage.kind == "start")
+        query = cls(client, wire.start_nodes, name=start_stage.name)
+        query._stages = wire.stages
         query.start = Stage(query, start_stage.name)
         return query
 
@@ -321,7 +282,7 @@ class NutmegQuery:
     ) -> Stage:
         stage_name = name or self._next_name("stage")
         self._add_stage(
-            _StageSpec(
+            QueryStage(
                 name=stage_name,
                 kind="follow",
                 sources=(source,),
@@ -349,7 +310,7 @@ class NutmegQuery:
             raise ValueError(f"{kind} requires exactly two stages")
         stage_name = name or self._next_name(kind)
         self._add_stage(
-            _StageSpec(
+            QueryStage(
                 name=stage_name,
                 kind=kind,
                 sources=stage_names,
@@ -359,7 +320,7 @@ class NutmegQuery:
         )
         return Stage(self, stage_name)
 
-    def _add_stage(self, spec: _StageSpec) -> None:
+    def _add_stage(self, spec: QueryStage) -> None:
         if spec.name in self._stages:
             raise ValueError(f"Stage {spec.name!r} already exists")
         for source in spec.sources:

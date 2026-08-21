@@ -169,6 +169,17 @@ async def test_get_neighbors_filters_by_inclusive_score_window():
     ]
 
 
+async def test_get_neighbors_accepts_open_ended_score_windows():
+    g = NutmegGraph(fakeredis.FakeRedis())
+    await g.add_node("ada", "player")
+    for node_id, score in [("early", 2005), ("late", 2015)]:
+        await g.add_node(node_id, "team")
+        await g.add_edge("ada", node_id, "played_for", score=score)
+
+    assert await g.get_neighbors("ada", ["played_for"], end=2005) == ["early"]
+    assert await g.get_neighbors("ada", ["played_for"], start=2015) == ["late"]
+
+
 async def test_get_neighbors_can_return_scores_for_query_execution():
     g = NutmegGraph(fakeredis.FakeRedis())
     await g.add_node("ada", "player")

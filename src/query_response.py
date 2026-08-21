@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.query_plan import QueryPlan
+from src.query_wire import QueryWire
 
 
 ALLOWED_RESPONSE_FIELDS = {"wire_version", "stages", "nodes", "scores"}
@@ -51,7 +51,7 @@ class QueryResult:
 def load_query_response(
     response: dict[str, Any],
     *,
-    plan: QueryPlan | None = None,
+    plan: QueryWire | None = None,
 ) -> QueryResult:
     if not isinstance(response, dict):
         raise ValueError("response must be an object")
@@ -76,7 +76,7 @@ def load_query_response(
     )
 
 
-def validate_query_response(response: dict[str, Any], *, plan: QueryPlan | None = None) -> None:
+def validate_query_response(response: dict[str, Any], *, plan: QueryWire | None = None) -> None:
     load_query_response(response, plan=plan)
 
 
@@ -146,7 +146,7 @@ def _load_scores(data: Any, stages: dict[str, list[str]]) -> dict[str, dict[str,
 def _validate_response_matches_plan(
     stages: dict[str, list[str]],
     scores: dict[str, dict[str, float]],
-    plan: QueryPlan,
+    plan: QueryWire,
 ) -> None:
     expected_stages = set(plan.stages)
     actual_stages = set(stages)

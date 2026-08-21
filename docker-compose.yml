@@ -75,7 +75,7 @@ services:
         FROM python:3.14-slim
         WORKDIR /app
         COPY pyproject.toml ./
-        RUN pip install --no-cache-dir redis fastmcp httpx fastapi uvicorn pytest
+        RUN pip install --no-cache-dir redis fastmcp httpx fastapi uvicorn pytest pytest-asyncio
         COPY src/ ./src/
         COPY tests/ ./tests/
         ENV PYTHONPATH=/app \

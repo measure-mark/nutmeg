@@ -50,6 +50,52 @@ def make_http_error(body, status_code=400):
     return status_code, body
 
 
+async def test_http_client_builds_direct_requests_and_handles_empty_responses(fake_http):
+    responses, calls = fake_http
+    client = NutmegClient("http://nutmeg.test", timeout=3)
+    responses.update(
+        {
+            "http://nutmeg.test/nodes/ada": {"node_type": "person"},
+            "http://nutmeg.test/nodes/ada/degree": {"total": 1, "by_type": {"friend": 1}},
+            "http://nutmeg.test/nodes/ada/degree?edge_type=friend": 1,
+            "http://nutmeg.test/nodes/ada/neighbors?edge_types=a&edge_types=b&start=10&end=20": [
+                "bob"
+            ],
+            "http://nutmeg.test/empty": None,
+        }
+    )
+
+    assert await client.get_node("ada") == {"node_type": "person"}
+    assert await client.get_degree("ada") == {"total": 1, "by_type": {"friend": 1}}
+    assert await client.get_degree("ada", "friend") == 1
+    assert await client.get_neighbors("ada", ["a", "b"], start=10, end=20) == ["bob"]
+    assert await client._request("DELETE", "/empty") is None
+    assert [call["url"] for call in calls] == [
+        "http://nutmeg.test/nodes/ada",
+        "http://nutmeg.test/nodes/ada/degree",
+        "http://nutmeg.test/nodes/ada/degree?edge_type=friend",
+        "http://nutmeg.test/nodes/ada/neighbors?edge_types=a&edge_types=b&start=10&end=20",
+        "http://nutmeg.test/empty",
+    ]
+
+
+async def test_http_client_extracts_json_and_plain_error_details(fake_http):
+    responses, _ = fake_http
+    client = NutmegClient("http://nutmeg.test")
+
+    responses["http://nutmeg.test/nodes/json-error"] = make_http_error(
+        {"detail": "node missing"}
+    )
+    with pytest.raises(NutmegHTTPError) as exc:
+        await client.get_node("json-error")
+    assert exc.value.detail == "node missing"
+
+    responses["http://nutmeg.test/nodes/plain-error"] = make_http_error("plain bad")
+    with pytest.raises(NutmegHTTPError) as exc:
+        await client.get_node("plain-error")
+    assert exc.value.detail == "plain bad"
+
+
 def build_set_query(client):
     query = client.query("ada", attributes=True)
     connected = query.follow_edges(
@@ -144,6 +190,24 @@ async def test_execute_posts_query_once_and_hydrates_result(fake_http):
     ]
 
 
+async def test_execute_rejects_response_that_does_not_match_requested_scores(fake_http):
+    responses, _ = fake_http
+    client = NutmegClient("http://nutmeg.test")
+    responses["http://nutmeg.test/queries/execute"] = {
+        "wire_version": 1,
+        "stages": {"start_stage": ["ada"], "connected": ["bob"]},
+        "nodes": {"bob": {"node_type": "person"}},
+    }
+    query = client.query("ada").follow_edges(
+        "connected_to",
+        name="connected",
+        scores=True,
+    ).query
+
+    with pytest.raises(ValueError, match="requested score stages"):
+        await query.execute()
+
+
 async def test_query_roundtrips_through_dict_and_json():
     original = build_set_query(NutmegClient("http://nutmeg.test"))
 
@@ -152,6 +216,14 @@ async def test_query_roundtrips_through_dict_and_json():
 
     assert from_dict.to_dict() == original.to_dict()
     assert from_json.to_dict() == original.to_dict()
+
+
+def test_client_query_wrappers_use_shared_wire_validation():
+    client = NutmegClient("http://nutmeg.test")
+    query = build_set_query(client)
+
+    assert client.query_from_dict(query.to_dict()).to_dict() == query.to_dict()
+    assert client.query_from_json(query.to_json()).to_dict() == query.to_dict()
 
 
 async def test_result_roundtrips_through_dict_and_json_with_scores():
@@ -218,6 +290,9 @@ async def test_get_nodes_before_execute_is_rejected():
     with pytest.raises(RuntimeError, match="not been executed"):
         query.get_nodes("start_stage")
 
+    with pytest.raises(RuntimeError, match="not been executed"):
+        query.get_scores("start_stage")
+
 
 async def test_query_json_is_compact_valid_json_and_dedupes_start_nodes():
     query = NutmegClient("http://nutmeg.test").query(["Ada Lovelace", "Ada Lovelace"])
@@ -225,4 +300,3 @@ async def test_query_json_is_compact_valid_json_and_dedupes_start_nodes():
 
     assert json.dumps(json.loads(payload), separators=(",", ":"), sort_keys=True) == payload
     assert json.loads(payload)["start_nodes"] == ["Ada Lovelace"]
-    assert "collapse" not in payload

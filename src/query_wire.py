@@ -1,4 +1,4 @@
-"""Wire-format query plan helpers shared by the client and server."""
+"""Shared query wire-format types and validation for the client and server."""
 
 from __future__ import annotations
 
@@ -93,12 +93,12 @@ class QueryStage:
 
 
 @dataclass(frozen=True)
-class QueryPlan:
+class QueryWire:
     start_nodes: list[str]
     stages: dict[str, QueryStage]
 
 
-def load_query_plan(query_plan: dict[str, Any]) -> QueryPlan:
+def load_query_wire(query_plan: dict[str, Any]) -> QueryWire:
     if not isinstance(query_plan, dict):
         raise ValueError("query plan must be an object")
     if query_plan.get("wire_version") != 1:
@@ -115,11 +115,11 @@ def load_query_plan(query_plan: dict[str, Any]) -> QueryPlan:
     if not isinstance(stage_specs, list):
         raise ValueError("query stage_specs must be a list")
     stages = [QueryStage.from_dict(spec) for spec in stage_specs]
-    stage_map = validate_query_plan(start_nodes, stages)
-    return QueryPlan(start_nodes=start_nodes, stages=stage_map)
+    stage_map = validate_query_wire(start_nodes, stages)
+    return QueryWire(start_nodes=start_nodes, stages=stage_map)
 
 
-def validate_query_plan(
+def validate_query_wire(
     start_nodes: list[str],
     stages: Iterable[QueryStage] | dict[str, QueryStage],
 ) -> dict[str, QueryStage]:
