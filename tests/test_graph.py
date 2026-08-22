@@ -23,8 +23,8 @@ async def test_add_node_is_idempotent():
     assert await g.get_degree("ada") == {"total": 0, "by_type": {}}
 
 
-async def test_add_node_overwrites_on_conflicting_call():
-    """Design decision: add_node is an upsert, so a second call with new data wins."""
+async def test_add_node_overwrites_attributes_for_the_same_type():
+    """Same-type add_node calls replace attributes without changing node identity."""
     r = fakeredis.FakeRedis()
     g = NutmegGraph(r)
     await g.add_node("ada", "player", {"name": "Ada"})

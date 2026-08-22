@@ -1,11 +1,10 @@
-1. MCP server that shows the meta graph
-   We will want to track the meta graph
+1. [done] Redis-backed meta graph exposed through HTTP and MCP
 
 2. graph traversal engine called "dribble", will use a topological sort
 
 3.  Move redis space so that multiple graphs can exist, nutmeg:default:... or nutmeg:nba:...
 
-4. unit tests with fakearedis are useless, we need integration tests
+4. Keep real-Redis integration tests for semantics; use fakeredis only for fast invariant checks
 
 5.  How do we handle lost conections with redis?
 

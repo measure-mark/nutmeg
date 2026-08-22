@@ -1,24 +1,13 @@
 # Nutmeg
 
 Nutmeg is a graph database using Redis for persistence, optimized for set
-operations and ordered traversal rather than path reconstruction.
+operations where edges are strictly ordered (e.g., by date).
 
 It is built for questions like “who can I see after subtracting blockers?” or
-“which nodes are in either of these traversals?” A query stage is a set of node
-ids. You branch, union, intersect, subtract, and continue traversing from those
-sets. Nutmeg intentionally returns compact stage results instead of full paths.
-
-## How Edges Are Stored
-
-Nodes are Redis hashes keyed by node id. Edges are directed and typed. Each
-out-edge set is a Redis sorted set keyed by `(source_node, edge_type)`, with the
-target node id as the member and the edge score as the sorted-set score.
-
-That sorted-set layout gives Nutmeg its query shape:
-
-- neighbors come back in score order
-- `start` and `end` are inclusive score bounds
-- duplicate targets reached through multiple sources keep their best, lowest score
+“show me the 10 most recent concerts at the House of Blues?” A query stage is
+a set of node ids. You branch, union, intersect, subtract, and continue
+traversing from those sets. Nutmeg intentionally returns compact stage results
+instead of full paths.
 
 ## Python Client
 
@@ -35,7 +24,7 @@ plays_for_degree = await nutmeg.get_degree("ada", "plays_for")
 neighbors = await nutmeg.get_neighbors("ada", ["connected_to"], start=10, end=20)
 ```
 
-## Server-Side Queries
+## The query builder
 
 Queries are lazy. The client builds a query plan locally, then `execute()` sends
 the whole plan to `POST /queries/execute`. Nutmeg executes the traversal on the
@@ -137,6 +126,31 @@ saved_result = result.to_json()
 result = QueryResult.from_json(saved_result)
 ```
 
+# Tech details
+
+## How Edges Are Stored
+
+Nodes are Redis hashes keyed by node id. Edges are directed and typed. Each
+out-edge set is a Redis sorted set keyed by `(source_node, edge_type)`, with the
+target node id as the member and the edge score as the sorted-set score.
+
+That sorted-set layout gives Nutmeg its query shape:
+
+- neighbors come back in score order
+- `start` and `end` are inclusive score bounds
+- duplicate targets reached through multiple sources keep their best, lowest score
+
+## Meta Graph
+
+Nutmeg maintains node-type, edge-type, `(source_type, edge_type)`, and
+`(source_type, edge_type, target_type)` counts in four Redis hashes. The same
+Lua scripts that write nodes and edges update these counters, so graph data and
+its metadata change atomically. `GET /meta` returns all four views in one
+consistent snapshot.
+
+Node types are immutable after creation. Re-adding a node with the same type
+updates its attributes; re-adding it with a different type returns HTTP 400.
+
 ## Quickstart
 
 ### Docker
@@ -186,17 +200,19 @@ pytest
 ```
 
 Default tests do not require Docker or live Redis. Graph/API tests use
-`fakeredis`; client HTTP tests use an async HTTP transport; query-engine contract tests run
-against `NutmegGraph` directly.
+`fakeredis`, including a differential metadata recount after randomized mutation
+traces; client HTTP tests use an async HTTP transport; query-engine contract
+tests run against `NutmegGraph` directly.
 
-To prove the Python client against a live Nutmeg API backed by Redis:
+To run the live Redis, HTTP API, Python client, and MCP integration tests:
 
 ```
 docker compose run --rm --build test-client-integration
 ```
 
-That Compose service starts Redis and the API, seeds unique test data through
-HTTP, runs `tests/test_client_integration.py`, and deletes the test nodes.
+That Compose service starts Redis, the API, and MCP server, seeds unique test
+data through HTTP, verifies the raw Redis metadata and both public surfaces,
+and deletes the test nodes.
 
 ## API
 
@@ -207,19 +223,22 @@ HTTP, runs `tests/test_client_integration.py`, and deletes the test nodes.
 | `DELETE` | `/nodes/{node_id}` | -- |
 | `GET` | `/nodes/{node_id}/degree` | `?edge_type=` optional |
 | `GET` | `/nodes/{node_id}/neighbors` | `?edge_types=&start=&end=` optional |
+| `GET` | `/meta` | -- |
 | `POST` | `/queries/execute` | serialized client query plan |
 | `POST` | `/edges` | `{source_node, target_node, edge_type, attributes, score}` |
 | `DELETE` | `/edges` | `?source_node=&target_node=&edge_type=` |
 
-All writes are idempotent. Interactive docs are at `/docs` once the server is running.
+All writes are idempotent. A node's type cannot be changed after creation.
+Interactive docs are at `/docs` once the server is running.
 
 ## MCP
 
-One tool so far:
+Available tools:
 
 | Tool | Args | Returns |
 | --- | --- | --- |
 | `get_node` | `node_id` | `{node_type, attributes, degree}` |
+| `get_meta_graph` | -- | node, edge, node-edge, and node-edge-node counts |
 
 Served over streamable HTTP at `http://127.0.0.1:3888`.
 

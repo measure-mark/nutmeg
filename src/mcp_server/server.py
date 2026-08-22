@@ -4,11 +4,6 @@ Follows the same wiring convention as src/api/server.py: a REDIS_URL env var
 (defaulting to localhost) read once at module scope, and the resulting client
 handed to NutmegGraph by dependency injection.
 
-Just a stub for now -- get_node() is enough to prove the MCP infrastructure
-(container, port, transport) works end to end. More tools land here as the
-graph grows use cases that actually need them (CLAUDE.md: no abstraction, or
-in this case no tool, ahead of a real need for it).
-
 This module only defines the server; run it via the repo-root mcp_main.py
 (`python mcp_main.py`).
 """
@@ -34,3 +29,9 @@ async def get_node(node_id: str) -> dict:
     node_id: the node to look up. Raises if it hasn't been added.
     """
     return await graph.get_node(node_id)
+
+
+@mcp.tool()
+async def get_meta_graph() -> dict:
+    """Return live node-type and typed-edge counts for planning graph traversals."""
+    return await graph.get_meta_graph()
