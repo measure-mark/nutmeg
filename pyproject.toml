@@ -12,8 +12,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# lupa is fakeredis's optional Lua backend -- needed so fakeredis can run the
-# EVAL/EVALSHA scripts NutmegGraph.delete_node uses for atomicity.
+# lupa is fakeredis's optional Lua backend -- needed so fakeredis can run
+# NutmegGraph's atomic mutation scripts.
 dev = ["pytest", "pytest-asyncio", "fakeredis", "lupa"]
 
 [tool.pytest.ini_options]
