@@ -84,6 +84,31 @@ Set operations are binary. Chain them when you need more than two inputs:
 Set-operation stages do not have scores; `scores=True` is only valid on traversal
 stages created by `follow_edges()`.
 
+## MCP `run_query` Contract
+
+MCP clients can send the query plan directly as JSON; they do not need access to
+the Python client or repository files. The `run_query` tool accepts wire version
+1 with one non-empty `start_nodes` list and one `start` stage. A `follow` stage
+has one source and an `edge_type`; `union`, `intersect`, `subtract`, and
+`symmetric_difference` stages each have two sources. Sources are stage names,
+and dependencies must be acyclic.
+
+```json
+{
+  "wire_version": 1,
+  "start_nodes": ["ada"],
+  "stage_specs": [
+    {"name": "start", "kind": "start"},
+    {"name": "teams", "kind": "follow", "sources": ["start"],
+     "edge_type": "plays_for", "attributes": true, "scores": true}
+  ]
+}
+```
+
+`follow` stages may also use numeric inclusive `start` and `end` score bounds.
+Any stage may request `degrees` or `attributes`; only `follow` stages may request
+`scores`. Call `get_meta_graph` first to discover the graph's node and edge types.
+
 ## Response Shape
 
 The response keeps stage outputs compact:

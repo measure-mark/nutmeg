@@ -1,8 +1,9 @@
-1. [done] Redis-backed meta graph exposed through HTTP and MCP
+1. Traversal tool for MCP
+1a. Seek out Materialize the metagraph, and perform traverals and append pairs, then write arbitrary length pairs to make the graph traversalable. 
 
-2. graph traversal engine called "dribble", will use a topological sort
+Make the replace edge behavior optional at the DB level
 
-3.  Move redis space so that multiple graphs can exist, nutmeg:default:... or nutmeg:nba:...
+3.  Allow named DBs: Move redis space so that multiple graphs can exist, nutmeg:default:... or nutmeg:nba:...
 
 4. Keep real-Redis integration tests for semantics; use fakeredis only for fast invariant checks
 
