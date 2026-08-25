@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 import httpx
 
+from src.bulk_redis import DEFAULT_BATCH_SIZE
 from src.query_wire import QueryStage, load_query_wire
 from src.query_response import QueryResult, load_query_response
 
@@ -17,7 +19,9 @@ def _as_node_list(nodes: str | list[str] | tuple[str, ...]) -> list[str]:
 
 
 def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in params.items() if value is not None and value != []}
+    return {
+        key: value for key, value in params.items() if value is not None and value != []
+    }
 
 
 class NutmegHTTPError(RuntimeError):
@@ -66,6 +70,24 @@ class NutmegClient:
             "GET",
             f"/nodes/{node_id}/neighbors",
             params=params or None,
+        )
+
+    async def bulk_load(
+        self,
+        nodes: Iterable[Mapping[str, Any]] = (),
+        edges: Iterable[Mapping[str, Any]] = (),
+        *,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ) -> dict[str, Any]:
+        """Load nodes, then edges, using non-transactional Redis pipelines."""
+        return await self._request(
+            "POST",
+            "/bulk-load",
+            body={
+                "nodes": list(nodes),
+                "edges": list(edges),
+                "batch_size": batch_size,
+            },
         )
 
     def query(
@@ -258,7 +280,9 @@ class NutmegQuery:
     @classmethod
     def from_dict(cls, client: NutmegClient, data: dict[str, Any]) -> "NutmegQuery":
         wire = load_query_wire(data)
-        start_stage = next(stage for stage in wire.stages.values() if stage.kind == "start")
+        start_stage = next(
+            stage for stage in wire.stages.values() if stage.kind == "start"
+        )
         query = cls(client, wire.start_nodes, name=start_stage.name)
         query._stages = wire.stages
         query.start = Stage(query, start_stage.name)
@@ -325,7 +349,9 @@ class NutmegQuery:
             raise ValueError(f"Stage {spec.name!r} already exists")
         for source in spec.sources:
             if source not in self._stages:
-                raise ValueError(f"Stage {spec.name!r} depends on missing stage {source!r}")
+                raise ValueError(
+                    f"Stage {spec.name!r} depends on missing stage {source!r}"
+                )
         self._stages[spec.name] = spec
 
     def _next_name(self, base: str) -> str:

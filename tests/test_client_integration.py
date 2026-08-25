@@ -82,7 +82,9 @@ async def test_client_query_against_live_api_and_redis():
     try:
         for name, node_id in nodes.items():
             if name != "viewer":
-                await _seed_node(node_id, "post" if name.startswith("post") else "person")
+                await _seed_node(
+                    node_id, "post" if name.startswith("post") else "person"
+                )
 
         for source, target, edge_type, score in [
             ("viewer", "alice", "connected_to", 10),
@@ -156,6 +158,72 @@ async def test_client_query_against_live_api_and_redis():
         assert exc.value.status_code == 400
     finally:
         for node_id in nodes.values():
+            try:
+                await _request("DELETE", f"/nodes/{node_id}")
+            except Exception:
+                pass
+
+
+async def test_client_bulk_load_against_live_api_and_redis_is_partially_committed():
+    prefix = f"bulk_{uuid4().hex}"
+    existing = f"{prefix}_existing"
+    new = f"{prefix}_new"
+    missing = f"{prefix}_missing"
+    edge_type = f"{prefix}_knows"
+    node_type = f"{prefix}_person"
+    nutmeg = NutmegClient(LIVE_URL)
+
+    try:
+        await _seed_node(existing, node_type)
+        result = await nutmeg.bulk_load(
+            nodes=[
+                {"node_id": existing, "node_type": "team"},
+                {"node_id": new, "node_type": node_type, "attributes": {"bulk": True}},
+            ],
+            edges=[
+                {
+                    "source_node": new,
+                    "target_node": missing,
+                    "edge_type": edge_type,
+                },
+                {
+                    "source_node": existing,
+                    "target_node": new,
+                    "edge_type": edge_type,
+                    "score": 42,
+                },
+            ],
+            batch_size=1,
+        )
+
+        assert result == {
+            "nodes_loaded": 1,
+            "edges_loaded": 1,
+            "errors": [
+                {
+                    "kind": "node",
+                    "index": 0,
+                    "message": f"node {existing!r} already has type {node_type!r}",
+                },
+                {
+                    "kind": "edge",
+                    "index": 0,
+                    "message": f"target node {missing!r} does not exist",
+                },
+            ],
+        }
+        assert (await nutmeg.get_node(existing))["node_type"] == node_type
+        assert await nutmeg.get_node(new) == {
+            "node_type": node_type,
+            "attributes": {"bulk": True},
+            "degree": {"total": 0, "by_type": {}},
+        }
+        assert await nutmeg.get_neighbors(existing, [edge_type]) == [new]
+        meta = await _request("GET", "/meta")
+        assert meta["node_counts"][node_type] == 2
+        assert meta["edge_counts"][edge_type] == 1
+    finally:
+        for node_id in (existing, new):
             try:
                 await _request("DELETE", f"/nodes/{node_id}")
             except Exception:
