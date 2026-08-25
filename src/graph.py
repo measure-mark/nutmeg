@@ -11,30 +11,10 @@ this was built from for the full key layout and rationale.
 
 import json
 
-from src import keys
+from src import keys, meta_graph
 
 
-_META_COUNTER_LUA = """
-local function change_counter(key, field, amount)
-    local count = redis.call('HINCRBY', key, field, amount)
-    if count == 0 then
-        redis.call('HDEL', key, field)
-    end
-end
-
-local function change_edge_counters(source_type, target_type, edge_type, amount)
-    change_counter('%s', edge_type, amount)
-    change_counter('%s', cjson.encode({source_type, edge_type}), amount)
-    change_counter('%s', cjson.encode({source_type, edge_type, target_type}), amount)
-end
-""" % (
-    keys.META_EDGE_COUNTS,
-    keys.META_NODE_EDGE_COUNTS,
-    keys.META_NODE_EDGE_NODE_COUNTS,
-)
-
-
-_ADD_NODE_LUA = _META_COUNTER_LUA + ("""
+_ADD_NODE_LUA = meta_graph.COUNTER_LUA + ("""
 local node_id = ARGV[1]
 local node_type = ARGV[2]
 local attributes_json = ARGV[3]
@@ -65,7 +45,7 @@ return 1
 # set of keys touched (one per source of an in-edge) isn't known until the script runs.
 # That's fine for a single Redis instance (see docker-compose.yml) but would need
 # reworking for Redis Cluster, where every touched key must hash to the same slot.
-_DELETE_NODE_LUA = _META_COUNTER_LUA + ("""
+_DELETE_NODE_LUA = meta_graph.COUNTER_LUA + ("""
 local node_id = ARGV[1]
 local node_key = 'nutmeg:nodes:' .. node_id
 local node_type = redis.call('HGET', node_key, 'node_type')
@@ -140,7 +120,7 @@ return 1
 #             self._r.delete(attrs_key)
 #
 #         self._r.rpush(keys.in_edges_key(target_node), keys.in_edge_entry(edge_type, source_node))
-_ADD_EDGE_LUA = _META_COUNTER_LUA + """
+_ADD_EDGE_LUA = meta_graph.COUNTER_LUA + """
 local source_node = ARGV[1]
 local target_node = ARGV[2]
 local edge_type = ARGV[3]
@@ -190,7 +170,7 @@ return 1
 #         self._r.delete(keys.edge_attrs_key(source_node, edge_type, target_node))
 #         if self._r.zcard(edges_key) == 0:
 #             self._r.srem(keys.edge_types_key(source_node), edge_type)
-_DELETE_EDGE_LUA = _META_COUNTER_LUA + """
+_DELETE_EDGE_LUA = meta_graph.COUNTER_LUA + """
 local source_node = ARGV[1]
 local target_node = ARGV[2]
 local edge_type = ARGV[3]
@@ -213,32 +193,8 @@ end
 return 1
 """
 
-
-_GET_META_GRAPH_LUA = """
-return {
-    redis.call('HGETALL', '%s'),
-    redis.call('HGETALL', '%s'),
-    redis.call('HGETALL', '%s'),
-    redis.call('HGETALL', '%s')
-}
-""" % (
-    keys.META_NODE_COUNTS,
-    keys.META_EDGE_COUNTS,
-    keys.META_NODE_EDGE_COUNTS,
-    keys.META_NODE_EDGE_NODE_COUNTS,
-)
-
-
 def _decode_set(values) -> set:
     return {v.decode() for v in values}
-
-
-def _decode_hash(values) -> dict[str, int]:
-    decoded = {
-        values[index].decode(): int(values[index + 1])
-        for index in range(0, len(values), 2)
-    }
-    return dict(sorted(decoded.items()))
 
 
 def _check_identifier(value: str, label: str) -> None:
@@ -340,27 +296,8 @@ class NutmegGraph:
 
     async def get_meta_graph(self) -> dict:
         """Counts of live node types and typed edge relationships in one snapshot."""
-        node_values, edge_values, node_edge_values, node_edge_node_values = await self._r.eval(_GET_META_GRAPH_LUA, 0)
-        node_counts = _decode_hash(node_values)
-        edge_counts = _decode_hash(edge_values)
-        node_edge_counts = []
-        for field, count in _decode_hash(node_edge_values).items():
-            source_type, edge_type = json.loads(field)
-            node_edge_counts.append({"source_type": source_type, "edge_type": edge_type, "count": count})
-        node_edge_node_counts = []
-        for field, count in _decode_hash(node_edge_node_values).items():
-            source_type, edge_type, target_type = json.loads(field)
-            node_edge_node_counts.append(
-                {"source_type": source_type, "edge_type": edge_type, "target_type": target_type, "count": count}
-            )
-        node_edge_counts.sort(key=lambda item: (item["source_type"], item["edge_type"]))
-        node_edge_node_counts.sort(key=lambda item: (item["source_type"], item["edge_type"], item["target_type"]))
-        return {
-            "node_counts": node_counts,
-            "edge_counts": edge_counts,
-            "node_edge_counts": node_edge_counts,
-            "node_edge_node_counts": node_edge_node_counts,
-        }
+        snapshot = await self._r.eval(meta_graph.GET_META_GRAPH_LUA, 0)
+        return meta_graph.decode_snapshot(snapshot)
 
     # -- queries -----------------------------------------------------------
 
