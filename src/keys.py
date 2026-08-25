@@ -1,4 +1,4 @@
-"""Redis key-naming helpers for the graph store.
+"""Redis key names and naming helpers for the graph store.
 
 Kept as one small module so `graph.py` and its tests share a single source of
 truth for the key format, instead of formatting keys ad hoc in each place.
@@ -35,6 +35,12 @@ def edge_types_key(node_id: str) -> str:
 
 def in_edges_key(node_id: str) -> str:
     return f"nutmeg:in_edges:{node_id}"
+
+
+META_NODE_COUNTS = "nutmeg:meta:node_counts"
+META_EDGE_COUNTS = "nutmeg:meta:edge_counts"
+META_NODE_EDGE_COUNTS = "nutmeg:meta:node_edge_counts"
+META_NODE_EDGE_NODE_COUNTS = "nutmeg:meta:node_edge_node_counts"
 
 
 def in_edge_entry(edge_type: str, source_node: str) -> str:

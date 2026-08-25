@@ -66,6 +66,17 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 3888), timeout=2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   test-client-integration:
@@ -80,14 +91,25 @@ services:
         COPY tests/ ./tests/
         ENV PYTHONPATH=/app \
             PYTHONUNBUFFERED=1
-    command: ["python", "-m", "pytest", "tests/test_client_integration.py"]
+    command:
+      [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_client_integration.py",
+        "tests/test_meta_integration.py",
+      ]
     profiles: ["test"]
     environment:
       NUTMEG_LIVE_URL: http://api:3879
+      NUTMEG_MCP_URL: http://mcp:3888/mcp
+      NUTMEG_REDIS_URL: redis://redis:6379/0
     depends_on:
       redis:
         condition: service_healthy
       api:
+        condition: service_healthy
+      mcp:
         condition: service_healthy
 
 volumes:

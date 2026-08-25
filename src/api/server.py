@@ -82,6 +82,11 @@ async def get_neighbors(
     )
 
 
+@app.get("/meta")
+async def get_meta_graph() -> dict:
+    return await graph.get_meta_graph()
+
+
 @app.post("/queries/execute")
 async def execute_query(query_plan: dict) -> dict:
     return await QueryExecutor(graph).execute(query_plan)
