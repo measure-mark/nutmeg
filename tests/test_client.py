@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from src.bulk_redis import DEFAULT_BATCH_SIZE
 from src.client import NutmegClient, NutmegHTTPError, NutmegQuery, QueryResult
 
 
@@ -25,22 +26,32 @@ def fake_http(monkeypatch):
 
         async def request(self, method, url, *, params=None, json=None):
             full_url = str(httpx.URL(url, params=params))
-            calls.append({
-                "method": method,
-                "url": full_url,
-                "headers": {"Content-type": "application/json"} if json is not None else {},
-                "timeout": self.timeout,
-                "body": json,
-            })
+            calls.append(
+                {
+                    "method": method,
+                    "url": full_url,
+                    "headers": {"Content-type": "application/json"}
+                    if json is not None
+                    else {},
+                    "timeout": self.timeout,
+                    "body": json,
+                }
+            )
             response = responses[full_url]
             if isinstance(response, tuple):
                 status, body = response
-                response = httpx.Response(status, text=body) if isinstance(body, str) else httpx.Response(status, json=body)
+                response = (
+                    httpx.Response(status, text=body)
+                    if isinstance(body, str)
+                    else httpx.Response(status, json=body)
+                )
                 response.request = httpx.Request(method, full_url)
                 return response
             if response is None:
                 return httpx.Response(204, request=httpx.Request(method, full_url))
-            return httpx.Response(200, json=response, request=httpx.Request(method, full_url))
+            return httpx.Response(
+                200, json=response, request=httpx.Request(method, full_url)
+            )
 
     monkeypatch.setattr("src.client.httpx.AsyncClient", FakeAsyncClient)
     return responses, calls
@@ -50,13 +61,18 @@ def make_http_error(body, status_code=400):
     return status_code, body
 
 
-async def test_http_client_builds_direct_requests_and_handles_empty_responses(fake_http):
+async def test_http_client_builds_direct_requests_and_handles_empty_responses(
+    fake_http,
+):
     responses, calls = fake_http
     client = NutmegClient("http://nutmeg.test", timeout=3)
     responses.update(
         {
             "http://nutmeg.test/nodes/ada": {"node_type": "person"},
-            "http://nutmeg.test/nodes/ada/degree": {"total": 1, "by_type": {"friend": 1}},
+            "http://nutmeg.test/nodes/ada/degree": {
+                "total": 1,
+                "by_type": {"friend": 1},
+            },
             "http://nutmeg.test/nodes/ada/degree?edge_type=friend": 1,
             "http://nutmeg.test/nodes/ada/neighbors?edge_types=a&edge_types=b&start=10&end=20": [
                 "bob"
@@ -77,6 +93,58 @@ async def test_http_client_builds_direct_requests_and_handles_empty_responses(fa
         "http://nutmeg.test/nodes/ada/neighbors?edge_types=a&edge_types=b&start=10&end=20",
         "http://nutmeg.test/empty",
     ]
+
+
+async def test_bulk_load_is_one_client_request_with_explicit_batching(fake_http):
+    responses, calls = fake_http
+    client = NutmegClient("http://nutmeg.test")
+    responses["http://nutmeg.test/bulk-load"] = {
+        "nodes_loaded": 2,
+        "edges_loaded": 1,
+        "errors": [],
+    }
+    nodes = (
+        {"node_id": node_id, "node_type": "person"} for node_id in ("ada", "grace")
+    )
+    edges = [
+        {
+            "source_node": "ada",
+            "target_node": "grace",
+            "edge_type": "knows",
+        }
+    ]
+    result = await client.bulk_load(nodes, edges, batch_size=250)
+
+    assert result == {"nodes_loaded": 2, "edges_loaded": 1, "errors": []}
+    assert calls == [
+        {
+            "method": "POST",
+            "url": "http://nutmeg.test/bulk-load",
+            "headers": {"Content-type": "application/json"},
+            "timeout": 10,
+            "body": {
+                "nodes": [
+                    {"node_id": "ada", "node_type": "person"},
+                    {"node_id": "grace", "node_type": "person"},
+                ],
+                "edges": edges,
+                "batch_size": 250,
+            },
+        }
+    ]
+
+
+async def test_bulk_load_uses_the_shared_default_batch_size(fake_http):
+    responses, calls = fake_http
+    responses["http://nutmeg.test/bulk-load"] = {
+        "nodes_loaded": 0,
+        "edges_loaded": 0,
+        "errors": [],
+    }
+
+    await NutmegClient("http://nutmeg.test").bulk_load()
+
+    assert calls[0]["body"]["batch_size"] == DEFAULT_BATCH_SIZE
 
 
 async def test_http_client_extracts_json_and_plain_error_details(fake_http):
@@ -156,7 +224,12 @@ async def test_query_builder_serializes_server_side_plan():
                 "kind": "symmetric_difference",
                 "sources": ["visible", "blocked"],
             },
-            {"name": "posts", "kind": "follow", "sources": ["merged"], "edge_type": "posted"},
+            {
+                "name": "posts",
+                "kind": "follow",
+                "sources": ["merged"],
+                "edge_type": "posted",
+            },
         ],
     }
 
@@ -170,9 +243,11 @@ async def test_execute_posts_query_once_and_hydrates_result(fake_http):
         "nodes": {"bob": {"node_type": "person"}},
         "scores": {"connected": {"bob": 10}},
     }
-    query = client.query("ada").follow_edges(
-        "connected_to", name="connected", scores=True
-    ).query
+    query = (
+        client.query("ada")
+        .follow_edges("connected_to", name="connected", scores=True)
+        .query
+    )
 
     result = await query.execute()
 
@@ -198,11 +273,15 @@ async def test_execute_rejects_response_that_does_not_match_requested_scores(fak
         "stages": {"start_stage": ["ada"], "connected": ["bob"]},
         "nodes": {"bob": {"node_type": "person"}},
     }
-    query = client.query("ada").follow_edges(
-        "connected_to",
-        name="connected",
-        scores=True,
-    ).query
+    query = (
+        client.query("ada")
+        .follow_edges(
+            "connected_to",
+            name="connected",
+            scores=True,
+        )
+        .query
+    )
 
     with pytest.raises(ValueError, match="requested score stages"):
         await query.execute()
@@ -211,8 +290,12 @@ async def test_execute_rejects_response_that_does_not_match_requested_scores(fak
 async def test_query_roundtrips_through_dict_and_json():
     original = build_set_query(NutmegClient("http://nutmeg.test"))
 
-    from_dict = NutmegQuery.from_dict(NutmegClient("http://nutmeg.test"), original.to_dict())
-    from_json = NutmegQuery.from_json(NutmegClient("http://nutmeg.test"), original.to_json())
+    from_dict = NutmegQuery.from_dict(
+        NutmegClient("http://nutmeg.test"), original.to_dict()
+    )
+    from_json = NutmegQuery.from_json(
+        NutmegClient("http://nutmeg.test"), original.to_json()
+    )
 
     assert from_dict.to_dict() == original.to_dict()
     assert from_json.to_dict() == original.to_dict()
@@ -298,5 +381,8 @@ async def test_query_json_is_compact_valid_json_and_dedupes_start_nodes():
     query = NutmegClient("http://nutmeg.test").query(["Ada Lovelace", "Ada Lovelace"])
     payload = query.to_json()
 
-    assert json.dumps(json.loads(payload), separators=(",", ":"), sort_keys=True) == payload
+    assert (
+        json.dumps(json.loads(payload), separators=(",", ":"), sort_keys=True)
+        == payload
+    )
     assert json.loads(payload)["start_nodes"] == ["Ada Lovelace"]

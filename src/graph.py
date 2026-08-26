@@ -193,6 +193,7 @@ end
 return 1
 """
 
+
 def _decode_set(values) -> set:
     return {v.decode() for v in values}
 
@@ -204,18 +205,92 @@ def _check_identifier(value: str, label: str) -> None:
         raise ValueError(f"Invalid {label}: {value!r}")
 
 
+class GraphWriteScripts:
+    """Shared registered-script contract for graph upserts.
+
+    This class owns validation, Lua argument encoding, and response decoding so
+    single and bulk writes cannot drift apart when a script changes.
+    """
+
+    def __init__(self, redis_client):
+        self._add_node = redis_client.register_script(_ADD_NODE_LUA)
+        self._add_edge = redis_client.register_script(_ADD_EDGE_LUA)
+
+    @staticmethod
+    def validate_node(node_id: str) -> None:
+        _check_identifier(node_id, "node_id")
+
+    @staticmethod
+    def validate_edge(source_node: str, target_node: str, edge_type: str) -> None:
+        _check_identifier(source_node, "node_id")
+        _check_identifier(target_node, "node_id")
+        _check_identifier(edge_type, "edge_type")
+
+    async def add_node(
+        self,
+        client,
+        node_id: str,
+        node_type: str,
+        attributes: dict | None = None,
+    ):
+        self.validate_node(node_id)
+        return await self._add_node(
+            args=[node_id, node_type, json.dumps(attributes or {})],
+            client=client,
+        )
+
+    async def add_edge(
+        self,
+        client,
+        source_node: str,
+        target_node: str,
+        edge_type: str,
+        attributes: dict | None = None,
+        score: float = 0,
+    ):
+        self.validate_edge(source_node, target_node, edge_type)
+        return await self._add_edge(
+            args=[
+                source_node,
+                target_node,
+                edge_type,
+                score,
+                json.dumps(attributes) if attributes else "",
+            ],
+            client=client,
+        )
+
+    @staticmethod
+    def add_node_error(node_id: str, response) -> str | None:
+        if isinstance(response, bytes):
+            return f"node {node_id!r} already has type {response.decode()!r}"
+        return None
+
+    @staticmethod
+    def add_edge_error(
+        source_node: str,
+        target_node: str,
+        response,
+    ) -> str | None:
+        if response == -1:
+            return f"source node {source_node!r} does not exist"
+        if response == -2:
+            return f"target node {target_node!r} does not exist"
+        return None
+
+
 class NutmegGraph:
     def __init__(self, redis_client):
         self._r = redis_client
+        self._writes = GraphWriteScripts(redis_client)
 
     # -- nodes ---------------------------------------------------------
 
     async def add_node(self, node_id: str, node_type: str, attributes: dict | None = None) -> None:
         """Upsert a node. Its type is immutable; attributes may be replaced."""
-        _check_identifier(node_id, "node_id")
-        result = await self._r.eval(_ADD_NODE_LUA, 0, node_id, node_type, json.dumps(attributes or {}))
-        if isinstance(result, bytes):
-            raise ValueError(f"node {node_id!r} already has type {result.decode()!r}")
+        result = await self._writes.add_node(self._r, node_id, node_type, attributes)
+        if error := self._writes.add_node_error(node_id, result):
+            raise ValueError(error)
 
     async def get_node(self, node_id: str) -> dict:
         """A node's type, attributes, and out-degree in one call. Reuses get_degree
@@ -265,18 +340,16 @@ class NutmegGraph:
 
         Raises ValueError if source_node or target_node hasn't been added yet.
         """
-        _check_identifier(source_node, "node_id")
-        _check_identifier(target_node, "node_id")
-        _check_identifier(edge_type, "edge_type")
-
-        attributes_json = json.dumps(attributes) if attributes else ""
-        result = await self._r.eval(
-            _ADD_EDGE_LUA, 0, source_node, target_node, edge_type, score, attributes_json
+        result = await self._writes.add_edge(
+            self._r,
+            source_node,
+            target_node,
+            edge_type,
+            attributes,
+            score,
         )
-        if result == -1:
-            raise ValueError(f"source node {source_node!r} does not exist")
-        if result == -2:
-            raise ValueError(f"target node {target_node!r} does not exist")
+        if error := self._writes.add_edge_error(source_node, target_node, result):
+            raise ValueError(error)
 
     async def delete_edge(self, source_node: str, target_node: str, edge_type: str) -> None:
         """Remove a directed edge. No-op if it doesn't exist.

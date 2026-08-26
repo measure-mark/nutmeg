@@ -14,14 +14,16 @@ import os
 import redis.asyncio as redis
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.api.query_engine import QueryExecutor
+from src.bulk_redis import BulkRedisLoader, DEFAULT_BATCH_SIZE
 from src.graph import NutmegGraph
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis.from_url(REDIS_URL)
 graph = NutmegGraph(_redis)
+bulk_loader = BulkRedisLoader(_redis)
 
 app = FastAPI(title="nutmeg")
 
@@ -47,9 +49,24 @@ class EdgeCreate(BaseModel):
     score: float = 0
 
 
+class BulkLoadRequest(BaseModel):
+    nodes: list[NodeCreate] = Field(default_factory=list)
+    edges: list[EdgeCreate] = Field(default_factory=list)
+    batch_size: int = DEFAULT_BATCH_SIZE
+
+
 @app.post("/nodes", status_code=204)
 async def add_node(node: NodeCreate) -> None:
     await graph.add_node(node.node_id, node.node_type, node.attributes)
+
+
+@app.post("/bulk-load")
+async def bulk_load(request: BulkLoadRequest) -> dict:
+    return await bulk_loader.load(
+        (node.model_dump() for node in request.nodes),
+        (edge.model_dump() for edge in request.edges),
+        batch_size=request.batch_size,
+    )
 
 
 @app.delete("/nodes/{node_id}", status_code=204)

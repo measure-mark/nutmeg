@@ -15,12 +15,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 import src.api.server as server
+from src.bulk_redis import BulkRedisLoader
 from src.graph import NutmegGraph
 
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr(server, "graph", NutmegGraph(fakeredis.FakeRedis()))
+    redis_client = fakeredis.FakeRedis()
+    monkeypatch.setattr(server, "graph", NutmegGraph(redis_client))
+    monkeypatch.setattr(server, "bulk_loader", BulkRedisLoader(redis_client))
     return TestClient(server.app)
 
 
@@ -37,7 +40,40 @@ def test_add_node_then_add_edge_then_degree(client):
         "total": 1,
         "by_type": {"plays_for": 1},
     }
-    assert client.get("/nodes/ada/degree", params={"edge_type": "plays_for"}).json() == 1
+    assert (
+        client.get("/nodes/ada/degree", params={"edge_type": "plays_for"}).json() == 1
+    )
+
+
+def test_bulk_load_route_pipelines_nodes_before_edges(client):
+    response = client.post(
+        "/bulk-load",
+        json={
+            "nodes": [
+                {"node_id": "ada", "node_type": "player"},
+                {"node_id": "celtics", "node_type": "team"},
+            ],
+            "edges": [
+                {
+                    "source_node": "ada",
+                    "target_node": "celtics",
+                    "edge_type": "plays_for",
+                }
+            ],
+            "batch_size": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"nodes_loaded": 2, "edges_loaded": 1, "errors": []}
+    assert client.get("/nodes/ada/neighbors").json() == ["celtics"]
+
+
+def test_bulk_load_route_uses_loader_batch_size_validation(client):
+    response = client.post("/bulk-load", json={"batch_size": 0})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "batch_size must be between 1 and 10000"}
 
 
 def test_get_node_returns_node_document(client):
@@ -139,7 +175,11 @@ def test_delete_edge_then_degree_drops_to_zero(client):
     response = client.request(
         "DELETE",
         "/edges",
-        params={"source_node": "ada", "target_node": "celtics", "edge_type": "plays_for"},
+        params={
+            "source_node": "ada",
+            "target_node": "celtics",
+            "edge_type": "plays_for",
+        },
     )
 
     assert response.status_code == 204

@@ -1,13 +1,15 @@
 # Nutmeg
 
 Nutmeg is a graph database using Redis for persistence, optimized for set
-operations where edges are strictly ordered (e.g., by date).
+operations where edges are strictly ordered (e.g. by date). Nutmeg features both a Python client and an MCP server.  Both expose a rich traversal language that features set operations and branching. 
 
-It is built for questions like “who can I see after subtracting blockers?” or
+It is built for questions like “which connections are within three degrees of separation after subtracting blockers" or 
 “show me the 10 most recent concerts at the House of Blues?” A query stage is
 a set of node ids. You branch, union, intersect, subtract, and continue
 traversing from those sets. Nutmeg intentionally returns compact stage results
 instead of full paths.
+
+Nutmeg takes its inspiration from Facebook's TAO and SPiN's Garden, though it differs from both projects significantly. 
 
 ## Python Client
 
@@ -17,6 +19,21 @@ The client talks to the HTTP API and has no third-party runtime dependency.
 from src.client import NutmegClient
 
 nutmeg = NutmegClient("http://127.0.0.1:3879")
+
+await nutmeg.bulk_load(
+    nodes=[
+        {"node_id": "ada", "node_type": "person", "attributes": {"name": "Ada"}},
+        {"node_id": "grace", "node_type": "person", "attributes": {"name": "Grace"}},
+    ],
+    edges=[
+        {
+            "source_node": "ada",
+            "target_node": "grace",
+            "edge_type": "connected_to",
+            "score": 1,
+        }
+    ],
+)
 
 node = await nutmeg.get_node("ada")
 degree = await nutmeg.get_degree("ada")
@@ -84,160 +101,38 @@ Set operations are binary. Chain them when you need more than two inputs:
 Set-operation stages do not have scores; `scores=True` is only valid on traversal
 stages created by `follow_edges()`.
 
-## MCP `run_query` Contract
+## MCP
 
-MCP clients can send the query plan directly as JSON; they do not need access to
-the Python client or repository files. The `run_query` tool accepts wire version
-1 with one non-empty `start_nodes` list and one `start` stage. A `follow` stage
-has one source and an `edge_type`; `union`, `intersect`, `subtract`, and
-`symmetric_difference` stages each have two sources. Sources are stage names,
-and dependencies must be acyclic.
+THe MCP server is kept intentionally light, it exposes the Graph's schema, get_node, and the query engine. 
 
-```json
-{
-  "wire_version": 1,
-  "start_nodes": ["ada"],
-  "stage_specs": [
-    {"name": "start", "kind": "start"},
-    {"name": "teams", "kind": "follow", "sources": ["start"],
-     "edge_type": "plays_for", "attributes": true, "scores": true}
-  ]
-}
-```
+Available tools:
 
-`follow` stages may also use numeric inclusive `start` and `end` score bounds.
-Any stage may request `degrees` or `attributes`; only `follow` stages may request
-`scores`. Call `get_meta_graph` first to discover the graph's node and edge types.
+| Tool | Args | Returns |
+| --- | --- | --- |
+| `get_node` | `node_id` | `{node_type, attributes, degree}` |
+| `get_meta_graph` | -- | node, edge, node-edge, and node-edge-node counts |
 
-## Response Shape
-
-The response keeps stage outputs compact:
-
-```json
-{
-  "wire_version": 1,
-  "stages": {
-    "start_stage": ["ada"],
-    "connected": ["bob", "cara"],
-    "blocked": ["erin"],
-    "visible": ["bob", "cara"]
-  },
-  "nodes": {
-    "bob": {
-      "node_type": "person",
-      "attributes": {"name": "Bob"},
-      "degree": {"total": 1, "by_type": {"posted": 1}}
-    }
-  },
-  "scores": {
-    "connected": {"bob": 10.0, "cara": 20.0}
-  }
-}
-```
-
-`stages` are always lists of node ids. `nodes` contains only metadata requested
-by stages with `attributes=True` or `degrees=True`. `scores` is present only for
-traversal stages with `scores=True`; set-operation stages never emit scores.
-
-Query plans and results round-trip cleanly:
-
-```python
-from src.client import QueryResult
-
-saved_query = query.to_json()
-query = nutmeg.query_from_json(saved_query)
-
-saved_result = result.to_json()
-result = QueryResult.from_json(saved_result)
-```
-
-# Tech details
-
-## How Edges Are Stored
-
-Nodes are Redis hashes keyed by node id. Edges are directed and typed. Each
-out-edge set is a Redis sorted set keyed by `(source_node, edge_type)`, with the
-target node id as the member and the edge score as the sorted-set score.
-
-That sorted-set layout gives Nutmeg its query shape:
-
-- neighbors come back in score order
-- `start` and `end` are inclusive score bounds
-- duplicate targets reached through multiple sources keep their best, lowest score
+Served over streamable HTTP at `http://127.0.0.1:3888`.
 
 ## Meta Graph
 
-Nutmeg maintains node-type, edge-type, `(source_type, edge_type)`, and
-`(source_type, edge_type, target_type)` counts in four Redis hashes. The same
-Lua scripts that write nodes and edges update these counters, so graph data and
-its metadata change atomically. `GET /meta` returns all four views in one
-consistent snapshot.
-
-Node types are immutable after creation. Re-adding a node with the same type
-updates its attributes; re-adding it with a different type returns HTTP 400.
+Alongside the graph itself, Nutmeg keeps live counts of how many nodes and
+edges exist per type, so you can inspect a graph's shape without walking it.
+`GET /meta` returns those counts in one snapshot. See
+[docs/tech_details.md](docs/tech_details.md#meta-graph) for how it's stored
+and kept consistent.
 
 ## Quickstart
 
-### Docker
+See [docs/quickstart.md](docs/quickstart.md) for running Nutmeg with Docker or
+locally.
 
-```
-docker compose up -d
-```
+## Bulk loading
 
-This starts Redis, the API, and the MCP server:
-
-- API: `http://127.0.0.1:3879`
-- MCP server: `http://127.0.0.1:3888`
-- Redis: `127.0.0.1:6380` for host tools like `redis-cli`
-
-```
-curl -X POST http://127.0.0.1:3879/nodes \
-  -H 'Content-Type: application/json' \
-  -d '{"node_id": "ada", "node_type": "player", "attributes": {"name": "Ada"}}'
-```
-
-Node ids are plain, globally unique strings. `node_type` is already a separate
-field, so an id should not repeat it.
-
-### Local
-
-```
-conda env create -f environment.yml
-conda activate nutmeg
-REDIS_URL=redis://localhost:6380/0 python main.py
-REDIS_URL=redis://localhost:6380/0 python mcp_main.py
-```
-
-For API autoreload:
-
-```
-REDIS_URL=redis://localhost:6380/0 uvicorn src.api.server:app --reload --port 3879
-```
-
-`REDIS_URL` defaults to `redis://localhost:6379/0`. `API_PORT` and `MCP_PORT`
-default to `3879` and `3888`.
-
-## Tests
-
-```
-conda activate nutmeg
-pytest
-```
-
-Default tests do not require Docker or live Redis. Graph/API tests use
-`fakeredis`, including a differential metadata recount after randomized mutation
-traces; client HTTP tests use an async HTTP transport; query-engine contract
-tests run against `NutmegGraph` directly.
-
-To run the live Redis, HTTP API, Python client, and MCP integration tests:
-
-```
-docker compose run --rm --build test-client-integration
-```
-
-That Compose service starts Redis, the API, and MCP server, seeds unique test
-data through HTTP, verifies the raw Redis metadata and both public surfaces,
-and deletes the test nodes.
+High-throughput, non-transactional node and edge loading is available through
+the Python client. See [docs/BULK_LOAD.md](docs/BULK_LOAD.md) for the
+interface, batching behavior, partial-failure contract, and performance
+guidance. Bulk loading is not exposed through MCP.
 
 ## API
 
@@ -255,29 +150,3 @@ and deletes the test nodes.
 
 All writes are idempotent. A node's type cannot be changed after creation.
 Interactive docs are at `/docs` once the server is running.
-
-## MCP
-
-Available tools:
-
-| Tool | Args | Returns |
-| --- | --- | --- |
-| `get_node` | `node_id` | `{node_type, attributes, degree}` |
-| `get_meta_graph` | -- | node, edge, node-edge, and node-edge-node counts |
-
-Served over streamable HTTP at `http://127.0.0.1:3888`.
-
-## Layout
-
-All application code lives under `src/`; `main.py` and `mcp_main.py` at the repo
-root are the two obvious entry points that run it.
-
-- `main.py` -- run with `python main.py`.
-- `mcp_main.py` -- run with `python mcp_main.py`.
-- `src/graph.py` -- `NutmegGraph`, the async Redis-backed graph API.
-- `src/client.py` -- the async Python HTTP client and lazy query builder.
-- `src/query_wire.py` -- the shared query wire format and validation used by both sides.
-- `src/api/server.py` -- the FastAPI HTTP app.
-- `src/api/query_engine.py` -- server-side execution for client query plans.
-- `src/mcp_server/server.py` -- the FastMCP server exposing the graph.
-- `tests/` -- pytest coverage for graph, API, MCP, client query building, query execution, and live integration.
