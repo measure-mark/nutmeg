@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from src.graph import GraphWriteScripts
+from src.status_codes import InvalidQueryError, StatusCode
 
 
 DEFAULT_BATCH_SIZE = 5_000
@@ -30,7 +31,10 @@ class BulkRedisLoader:
         batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> dict[str, Any]:
         if not 1 <= batch_size <= MAX_BATCH_SIZE:
-            raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
+            raise InvalidQueryError(
+                f"batch_size must be between 1 and {MAX_BATCH_SIZE}",
+                reason="INVALID_BATCH_SIZE",
+            )
 
         node_records = list(nodes)
         edge_records = list(edges)
@@ -49,6 +53,9 @@ class BulkRedisLoader:
             await self._load_edge_batch(
                 edge_records[start : start + batch_size], start, result
             )
+        result["code"] = (
+            StatusCode.BULK_PARTIAL_FAILURE.value if result["errors"] else StatusCode.OK.value
+        )
         return result
 
     def _validate(

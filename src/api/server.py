@@ -12,6 +12,7 @@ local autoreload during development.
 import os
 
 import redis.asyncio as redis
+import redis.exceptions
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 from src.api.query_engine import QueryExecutor
 from src.bulk_redis import BulkRedisLoader, DEFAULT_BATCH_SIZE
 from src.graph import NutmegGraph
+from src.status_codes import NutmegError, ServiceUnavailableError
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis.from_url(REDIS_URL)
@@ -28,10 +30,28 @@ bulk_loader = BulkRedisLoader(_redis)
 app = FastAPI(title="nutmeg")
 
 
+@app.exception_handler(NutmegError)
+async def nutmeg_error_handler(request: Request, exc: NutmegError) -> JSONResponse:
+    """Every NutmegGraph/QueryExecutor error client code should switch on -- see
+    README.md's Status Codes section. Body shape is exc.to_dict(): code, detail,
+    and reason when the code carries one."""
+    return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+
+
+@app.exception_handler(redis.exceptions.RedisError)
+async def redis_error_handler(request: Request, exc: redis.exceptions.RedisError) -> JSONResponse:
+    """A lost connection or timed-out call to the graph store -- the request may
+    have never reached Redis, so it maps to SERVICE_UNAVAILABLE rather than a
+    generic 500, telling the client it's safe to retry."""
+    err = ServiceUnavailableError(f"redis error: {exc}")
+    return JSONResponse(status_code=err.http_status, content=err.to_dict())
+
+
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-    """NutmegGraph raises ValueError for a malformed/missing node_id -- that's a bad
-    request, not a server error, so it maps to 400 rather than an unhandled 500."""
+    """Fallback for a plain ValueError not carrying a status code (e.g. NutmegGraph's
+    node-type-conflict error) -- still a bad request, not a server error, so it maps
+    to 400 rather than an unhandled 500."""
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 

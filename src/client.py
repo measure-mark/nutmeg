@@ -25,10 +25,20 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 class NutmegHTTPError(RuntimeError):
-    def __init__(self, status_code: int, detail: Any):
+    """Raised for any non-2xx Nutmeg response.
+
+    code/reason surface the server's status code (see README.md's Status Codes
+    section) when the body carries one; both are None for a plain-text error
+    body or one predating that contract, so callers should not assume either
+    is set.
+    """
+
+    def __init__(self, status_code: int, detail: Any, *, code: str | None = None, reason: str | None = None):
         super().__init__(f"Nutmeg HTTP {status_code}: {detail}")
         self.status_code = status_code
         self.detail = detail
+        self.code = code
+        self.reason = reason
 
 
 class NutmegClient:
@@ -127,10 +137,20 @@ class NutmegClient:
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             try:
-                detail = exc.response.json().get("detail", exc.response.text)
+                error_body = exc.response.json()
+                detail = error_body.get("detail", exc.response.text)
+                code = error_body.get("code")
+                reason = error_body.get("reason")
             except (ValueError, AttributeError):
-                detail = exc.response.text
-            raise NutmegHTTPError(exc.response.status_code, detail) from exc
+                detail, code, reason = exc.response.text, None, None
+            raise NutmegHTTPError(exc.response.status_code, detail, code=code, reason=reason) from exc
+        except httpx.TimeoutException as exc:
+            # The request never got a response at all -- same RESOURCE_LIMIT_EXCEEDED
+            # code the server would report for a query that timed out server-side,
+            # so callers can handle both the same way.
+            raise NutmegHTTPError(
+                408, f"request to {url} timed out", code="RESOURCE_LIMIT_EXCEEDED", reason="TIMEOUT"
+            ) from exc
         return response.json() if response.content else None
 
 

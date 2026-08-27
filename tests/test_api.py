@@ -12,6 +12,7 @@ be repeating information the store already has.
 
 import fakeredis.aioredis as fakeredis
 import pytest
+import redis.exceptions
 from fastapi.testclient import TestClient
 
 import src.api.server as server
@@ -65,7 +66,12 @@ def test_bulk_load_route_pipelines_nodes_before_edges(client):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"nodes_loaded": 2, "edges_loaded": 1, "errors": []}
+    assert response.json() == {
+        "nodes_loaded": 2,
+        "edges_loaded": 1,
+        "errors": [],
+        "code": "OK",
+    }
     assert client.get("/nodes/ada/neighbors").json() == ["celtics"]
 
 
@@ -73,7 +79,11 @@ def test_bulk_load_route_uses_loader_batch_size_validation(client):
     response = client.post("/bulk-load", json={"batch_size": 0})
 
     assert response.status_code == 400
-    assert response.json() == {"detail": "batch_size must be between 1 and 10000"}
+    assert response.json() == {
+        "code": "INVALID_QUERY",
+        "detail": "batch_size must be between 1 and 10000",
+        "reason": "INVALID_BATCH_SIZE",
+    }
 
 
 def test_get_node_returns_node_document(client):
@@ -87,6 +97,28 @@ def test_get_node_returns_node_document(client):
         "attributes": {"name": "Ada"},
         "degree": {"total": 0, "by_type": {}},
     }
+
+
+def test_get_node_returns_node_not_found_status_code_if_missing(client):
+    response = client.get("/nodes/ghost")
+
+    assert response.status_code == 404
+    assert response.json() == {"code": "NODE_NOT_FOUND", "detail": "node 'ghost' does not exist"}
+
+
+def test_redis_connection_error_maps_to_service_unavailable(client, monkeypatch):
+    """Contract: a lost/unreachable Redis connection is reported as
+    SERVICE_UNAVAILABLE, not an unhandled 500, so clients know to retry."""
+
+    async def broken_get_node(node_id):
+        raise redis.exceptions.ConnectionError("connection refused")
+
+    monkeypatch.setattr(server.graph, "get_node", broken_get_node)
+
+    response = client.get("/nodes/ada")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "SERVICE_UNAVAILABLE"
 
 
 def test_get_neighbors_filters_by_edge_type(client):
@@ -186,7 +218,7 @@ def test_delete_edge_then_degree_drops_to_zero(client):
     assert client.get("/nodes/ada/degree").json() == {"total": 0, "by_type": {}}
 
 
-def test_add_edge_returns_400_if_target_node_does_not_exist(client):
+def test_add_edge_returns_404_if_target_node_does_not_exist(client):
     client.post("/nodes", json={"node_id": "ada", "node_type": "player"})
 
     response = client.post(
@@ -194,7 +226,11 @@ def test_add_edge_returns_400_if_target_node_does_not_exist(client):
         json={"source_node": "ada", "target_node": "celtics", "edge_type": "plays_for"},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "NODE_NOT_FOUND",
+        "detail": "target node 'celtics' does not exist",
+    }
 
 
 def test_delete_node_cascades_through_the_api(client):

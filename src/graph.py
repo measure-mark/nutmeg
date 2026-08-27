@@ -12,6 +12,7 @@ this was built from for the full key layout and rationale.
 import json
 
 from src import keys, meta_graph
+from src.status_codes import InvalidQueryError, NodeNotFoundError
 
 
 _ADD_NODE_LUA = meta_graph.COUNTER_LUA + ("""
@@ -199,10 +200,10 @@ def _decode_set(values) -> set:
 
 
 def _check_identifier(value: str, label: str) -> None:
-    """Raise ValueError naming the field if value isn't a valid node_id/edge_type.
+    """Raise InvalidQueryError naming the field if value isn't a valid node_id/edge_type.
     One place for this instead of a copy-pasted if/raise at every call site."""
     if not keys.is_valid_identifier(value):
-        raise ValueError(f"Invalid {label}: {value!r}")
+        raise InvalidQueryError(f"Invalid {label}: {value!r}", reason="INVALID_IDENTIFIER")
 
 
 class GraphWriteScripts:
@@ -272,6 +273,9 @@ class GraphWriteScripts:
         target_node: str,
         response,
     ) -> str | None:
+        """Returns a message for bulk-load's per-record error list. Callers that
+        need to raise (see NutmegGraph.add_edge) wrap the message in NodeNotFoundError
+        themselves -- bulk load reports the same failure without raising."""
         if response == -1:
             return f"source node {source_node!r} does not exist"
         if response == -2:
@@ -301,7 +305,7 @@ class NutmegGraph:
         _check_identifier(node_id, "node_id")
         node = await self._r.hgetall(keys.node_key(node_id))
         if not node:
-            raise ValueError(f"node {node_id!r} does not exist")
+            raise NodeNotFoundError(f"node {node_id!r} does not exist")
 
         return {
             "node_type": node[b"node_type"].decode(),
@@ -349,7 +353,7 @@ class NutmegGraph:
             score,
         )
         if error := self._writes.add_edge_error(source_node, target_node, result):
-            raise ValueError(error)
+            raise NodeNotFoundError(error)
 
     async def delete_edge(self, source_node: str, target_node: str, edge_type: str) -> None:
         """Remove a directed edge. No-op if it doesn't exist.
@@ -381,7 +385,7 @@ class NutmegGraph:
         """
         _check_identifier(node_id, "node_id")
         if not await self._r.exists(keys.node_key(node_id)):
-            raise ValueError(f"node {node_id!r} does not exist")
+            raise NodeNotFoundError(f"node {node_id!r} does not exist")
 
         if edge_type is not None:
             _check_identifier(edge_type, "edge_type")
@@ -413,7 +417,7 @@ class NutmegGraph:
         """
         _check_identifier(node_id, "node_id")
         if not await self._r.exists(keys.node_key(node_id)):
-            raise ValueError(f"node {node_id!r} does not exist")
+            raise NodeNotFoundError(f"node {node_id!r} does not exist")
         for edge_type in edge_types or []:
             _check_identifier(edge_type, "edge_type")
 

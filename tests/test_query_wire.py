@@ -2,7 +2,8 @@
 
 import pytest
 
-from src.query_wire import load_query_wire
+from src.query_wire import MAX_QUERY_DEPTH, load_query_wire
+from src.status_codes import InvalidQueryError, MaxDepthExceededError, StatusCode
 
 
 def valid_wire():
@@ -65,6 +66,55 @@ def test_invalid_wire_payloads_are_rejected(change, message):
 
     with pytest.raises(ValueError, match=message):
         load_query_wire(wire)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"wire_version": 2},
+        {"start_nodes": []},
+        {"stage_specs": []},
+        {"stage_specs": [{"name": "start_stage", "kind": "start", "sources": ["x"]}]},
+    ],
+)
+def test_invalid_wire_payloads_carry_the_invalid_query_status_code(change):
+    """Contract: every rejected wire payload is reported as INVALID_QUERY with a
+    reason, so a client can switch on `code` without parsing the message text."""
+    wire = valid_wire()
+    wire.update(change)
+
+    with pytest.raises(InvalidQueryError) as exc:
+        load_query_wire(wire)
+
+    assert exc.value.code == StatusCode.INVALID_QUERY
+    assert exc.value.reason is not None
+
+
+def _chained_follow_wire(depth: int) -> dict:
+    """A start stage followed by `depth` sequential follow stages -- the plan's
+    depth is exactly `depth`."""
+    stages = [{"name": "start_stage", "kind": "start"}]
+    previous = "start_stage"
+    for i in range(depth):
+        name = f"stage{i}"
+        stages.append(
+            {"name": name, "kind": "follow", "sources": [previous], "edge_type": "knows"}
+        )
+        previous = name
+    return {"wire_version": 1, "start_nodes": ["ada"], "stage_specs": stages}
+
+
+def test_query_wire_accepts_the_maximum_allowed_depth():
+    """Boundary: a plan exactly at MAX_QUERY_DEPTH is not rejected."""
+    wire = load_query_wire(_chained_follow_wire(MAX_QUERY_DEPTH))
+    assert len(wire.stages) == MAX_QUERY_DEPTH + 1
+
+
+def test_query_wire_rejects_a_plan_one_stage_past_the_maximum_depth():
+    with pytest.raises(MaxDepthExceededError) as exc:
+        load_query_wire(_chained_follow_wire(MAX_QUERY_DEPTH + 1))
+
+    assert exc.value.code == StatusCode.MAX_DEPTH_EXCEEDED
 
 
 def test_wire_loader_rejects_unknown_stage_fields():

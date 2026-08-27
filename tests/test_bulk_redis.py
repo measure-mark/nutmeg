@@ -29,7 +29,7 @@ async def test_bulk_load_writes_nodes_before_edges_and_keeps_graph_invariants():
         batch_size=1,
     )
 
-    assert result == {"nodes_loaded": 2, "edges_loaded": 1, "errors": []}
+    assert result == {"nodes_loaded": 2, "edges_loaded": 1, "errors": [], "code": "OK"}
     assert await graph.get_node("ada") == {
         "node_type": "person",
         "attributes": {"name": "Ada"},
@@ -84,6 +84,7 @@ async def test_bulk_load_reports_record_errors_after_other_records_commit():
                 "message": "target node 'missing' does not exist",
             },
         ],
+        "code": "BULK_PARTIAL_FAILURE",
     }
     assert await graph.get_neighbors("existing") == ["new"]
 

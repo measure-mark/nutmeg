@@ -1,7 +1,7 @@
 # Nutmeg
 
 Nutmeg is a graph database using Redis for persistence, optimized for set
-operations where edges are strictly ordered (e.g. by date). Nutmeg features both a Python client and an MCP server.  Both expose a rich traversal language that features set operations and branching. 
+operations where edges are *strictly ordered* (e.g. by date). By storing the edges as sorted sets, Nutmeg trades very fast read symantics of exisiting data for slower writes.  Nutmeg features both a Python client and an MCP server.  Both expose a rich traversal language that features set operations and branching. 
 
 It is built for questions like “which connections are within three degrees of separation after subtracting blockers" or 
 “show me the 10 most recent concerts at the House of Blues?” A query stage is
@@ -150,3 +150,35 @@ guidance. Bulk loading is not exposed through MCP.
 
 All writes are idempotent. A node's type cannot be changed after creation.
 Interactive docs are at `/docs` once the server is running.
+
+## Status Codes
+
+Every error the API, MCP server, and Python client can raise carries a short,
+stable `code` a caller can switch on, defined in `src/status_codes.py`. Where
+useful, an error also carries a `reason` -- more detail specific to that code,
+so the top-level list doesn't grow every time a new failure is distinguished.
+
+| Code | Meaning | Reasons |
+| --- | --- | --- |
+| `OK` | Request succeeded. | -- |
+| `SERVICE_UNAVAILABLE` | The graph store (Redis) could not be reached or timed out. Safe to retry. | -- |
+| `NODE_NOT_FOUND` | A well-formed node id does not exist in the graph. | -- |
+| `MAX_DEPTH_EXCEEDED` | A query plan chains more stages than the server allows to traverse (`MAX_QUERY_DEPTH` in `src/query_wire.py`). | -- |
+| `INVALID_QUERY` | A request document is malformed. | e.g. `UNSUPPORTED_WIRE_VERSION`, `MISSING_START_NODES`, `MISSING_STAGES`, `DUPLICATE_STAGE_NAME`, `UNKNOWN_STAGE_KIND`, `INVALID_FOLLOW_STAGE`, `INVALID_SET_STAGE_SOURCES`, `MISSING_PARENT_STAGE`, `CYCLE`, `INVALID_IDENTIFIER`, `INVALID_BATCH_SIZE`, and others -- see `src/query_wire.py` and `src/graph.py` for the full set |
+| `UNAUTHORIZED` | Reserved for future authentication support; nothing raises it yet. | -- |
+| `BULK_PARTIAL_FAILURE` | A `/bulk-load` request completed, but some records were rejected. Not raised as an error -- it's the `code` field in an otherwise-200 bulk-load response when `errors` is non-empty. See [docs/BULK_LOAD.md](docs/BULK_LOAD.md). | -- |
+| `RESOURCE_LIMIT_EXCEEDED` | A request exceeded a runtime resource limit. | `TIMEOUT` (server- or client-side), `RESULT_TOO_LARGE` (query touched more nodes than `max_result_nodes`) |
+
+**API**: an error response is a JSON body `{"code", "detail", "reason"?}` with a
+matching HTTP status (`NODE_NOT_FOUND` &rarr; 404, `INVALID_QUERY` /
+`MAX_DEPTH_EXCEEDED` &rarr; 400, `UNAUTHORIZED` &rarr; 401,
+`RESOURCE_LIMIT_EXCEEDED` &rarr; 429, `SERVICE_UNAVAILABLE` &rarr; 503).
+
+**Python client**: `NutmegHTTPError` exposes `.code` and `.reason` alongside
+the existing `.status_code` and `.detail`; both are `None` for a plain-text
+error body. A client-side request timeout is also reported as
+`RESOURCE_LIMIT_EXCEEDED` / `TIMEOUT`, the same as a server-side query timeout,
+so callers can handle both the same way.
+
+**MCP**: tool errors report `str(exc)`, which is prefixed `[CODE]` (or
+`[CODE:REASON]`) so the code is recoverable even without a structured field.

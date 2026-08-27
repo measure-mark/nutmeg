@@ -164,6 +164,63 @@ async def test_http_client_extracts_json_and_plain_error_details(fake_http):
     assert exc.value.detail == "plain bad"
 
 
+async def test_http_client_surfaces_code_and_reason_when_the_body_carries_them(fake_http):
+    """Contract: a status-coded error body (see status_codes.NutmegError.to_dict)
+    round-trips through NutmegHTTPError.code/reason, not just .detail."""
+    responses, _ = fake_http
+    client = NutmegClient("http://nutmeg.test")
+
+    responses["http://nutmeg.test/nodes/ghost"] = make_http_error(
+        {"code": "NODE_NOT_FOUND", "detail": "node 'ghost' does not exist"}, status_code=404
+    )
+    with pytest.raises(NutmegHTTPError) as exc:
+        await client.get_node("ghost")
+
+    assert exc.value.code == "NODE_NOT_FOUND"
+    assert exc.value.reason is None
+    assert exc.value.detail == "node 'ghost' does not exist"
+
+
+async def test_http_client_error_without_a_code_leaves_code_and_reason_none(fake_http):
+    """A plain-text or pre-status-code error body must not crash .code/.reason
+    access -- callers can check `if exc.code == ...` unconditionally."""
+    responses, _ = fake_http
+    client = NutmegClient("http://nutmeg.test")
+
+    responses["http://nutmeg.test/nodes/plain-error"] = make_http_error("plain bad")
+    with pytest.raises(NutmegHTTPError) as exc:
+        await client.get_node("plain-error")
+
+    assert exc.value.code is None
+    assert exc.value.reason is None
+
+
+async def test_http_client_maps_a_request_timeout_to_resource_limit_exceeded(monkeypatch):
+    """A request that never gets a response (network/server hang) is reported the
+    same way a server-side query timeout is, so callers handle both alike."""
+
+    class TimingOutAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def request(self, method, url, *, params=None, json=None):
+            raise httpx.TimeoutException("timed out", request=httpx.Request(method, url))
+
+    monkeypatch.setattr("src.client.httpx.AsyncClient", TimingOutAsyncClient)
+
+    with pytest.raises(NutmegHTTPError) as exc:
+        await NutmegClient("http://nutmeg.test").get_node("ada")
+
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert exc.value.reason == "TIMEOUT"
+
+
 def build_set_query(client):
     query = client.query("ada", attributes=True)
     connected = query.follow_edges(

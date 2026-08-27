@@ -6,6 +6,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from src.status_codes import InvalidQueryError, MaxDepthExceededError
+
 
 SET_KINDS = {"union", "intersect", "subtract", "symmetric_difference"}
 ALLOWED_KINDS = {"start", "follow", *SET_KINDS}
@@ -20,6 +22,11 @@ ALLOWED_STAGE_FIELDS = {
     "attributes",
     "scores",
 }
+
+# Longest allowed chain of stage dependencies (a stage's own depth is
+# 1 + max(source depths)). Guards against a plan whose sequential follow
+# stages would force an unbounded number of Redis round trips.
+MAX_QUERY_DEPTH = 20
 
 
 @dataclass(frozen=True)
@@ -62,23 +69,36 @@ class QueryStage:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "QueryStage":
         if not isinstance(data, dict):
-            raise ValueError("stage spec must be an object")
+            raise InvalidQueryError("stage spec must be an object", reason="INVALID_STAGE_SPEC")
         unknown = set(data) - ALLOWED_STAGE_FIELDS
         if unknown:
-            raise ValueError(f"Unknown stage fields: {sorted(unknown)}")
+            raise InvalidQueryError(
+                f"Unknown stage fields: {sorted(unknown)}", reason="UNKNOWN_STAGE_FIELDS"
+            )
         for field in ("name", "kind"):
             if field not in data:
-                raise ValueError(f"stage spec is missing required field {field!r}")
+                raise InvalidQueryError(
+                    f"stage spec is missing required field {field!r}",
+                    reason="MISSING_STAGE_FIELD",
+                )
             if not isinstance(data[field], str):
-                raise ValueError(f"stage field {field!r} must be a string")
+                raise InvalidQueryError(
+                    f"stage field {field!r} must be a string", reason="INVALID_STAGE_FIELD"
+                )
         sources = data.get("sources", ())
         if not isinstance(sources, (list, tuple)) or not all(
             isinstance(source, str) for source in sources
         ):
-            raise ValueError(f"stage {data['name']!r} sources must be a list of stage names")
+            raise InvalidQueryError(
+                f"stage {data['name']!r} sources must be a list of stage names",
+                reason="INVALID_STAGE_FIELD",
+            )
         for field in ("degrees", "attributes", "scores"):
             if field in data and not isinstance(data[field], bool):
-                raise ValueError(f"stage {data['name']!r} field {field!r} must be a boolean")
+                raise InvalidQueryError(
+                    f"stage {data['name']!r} field {field!r} must be a boolean",
+                    reason="INVALID_STAGE_FIELD",
+                )
         return cls(
             name=data["name"],
             kind=data["kind"],
@@ -100,20 +120,25 @@ class QueryWire:
 
 def load_query_wire(query_plan: dict[str, Any]) -> QueryWire:
     if not isinstance(query_plan, dict):
-        raise ValueError("query plan must be an object")
+        raise InvalidQueryError("query plan must be an object", reason="INVALID_PLAN")
     if query_plan.get("wire_version") != 1:
-        raise ValueError(f"Unsupported query wire_version {query_plan.get('wire_version')!r}")
+        raise InvalidQueryError(
+            f"Unsupported query wire_version {query_plan.get('wire_version')!r}",
+            reason="UNSUPPORTED_WIRE_VERSION",
+        )
 
     start_node_specs = query_plan.get("start_nodes", [])
     if not isinstance(start_node_specs, list) or not all(
         isinstance(node_id, str) for node_id in start_node_specs
     ):
-        raise ValueError("query start_nodes must be a list of node ids")
+        raise InvalidQueryError(
+            "query start_nodes must be a list of node ids", reason="INVALID_START_NODES"
+        )
     start_nodes = list(dict.fromkeys(start_node_specs))
 
     stage_specs = query_plan.get("stage_specs", [])
     if not isinstance(stage_specs, list):
-        raise ValueError("query stage_specs must be a list")
+        raise InvalidQueryError("query stage_specs must be a list", reason="INVALID_STAGE_SPECS")
     stages = [QueryStage.from_dict(spec) for spec in stage_specs]
     stage_map = validate_query_wire(start_nodes, stages)
     return QueryWire(start_nodes=start_nodes, stages=stage_map)
@@ -124,36 +149,63 @@ def validate_query_wire(
     stages: Iterable[QueryStage] | dict[str, QueryStage],
 ) -> dict[str, QueryStage]:
     if not start_nodes:
-        raise ValueError("query must contain at least one start node")
+        raise InvalidQueryError(
+            "query must contain at least one start node", reason="MISSING_START_NODES"
+        )
 
     stage_list = list(stages.values()) if isinstance(stages, dict) else list(stages)
     if not stage_list:
-        raise ValueError("query must contain at least one stage")
+        raise InvalidQueryError("query must contain at least one stage", reason="MISSING_STAGES")
     if len({stage.name for stage in stage_list}) != len(stage_list):
-        raise ValueError("query contains duplicate stage names")
+        raise InvalidQueryError(
+            "query contains duplicate stage names", reason="DUPLICATE_STAGE_NAME"
+        )
 
     for stage in stage_list:
         if stage.kind not in ALLOWED_KINDS:
-            raise ValueError(f"Unknown stage kind {stage.kind!r}")
+            raise InvalidQueryError(
+                f"Unknown stage kind {stage.kind!r}", reason="UNKNOWN_STAGE_KIND"
+            )
         if stage.kind == "start" and stage.sources:
-            raise ValueError(f"start stage {stage.name!r} cannot have sources")
+            raise InvalidQueryError(
+                f"start stage {stage.name!r} cannot have sources",
+                reason="START_STAGE_HAS_SOURCES",
+            )
         if stage.kind != "follow" and stage.edge_type is not None:
-            raise ValueError(f"{stage.kind} stage {stage.name!r} cannot have edge_type")
+            raise InvalidQueryError(
+                f"{stage.kind} stage {stage.name!r} cannot have edge_type",
+                reason="UNEXPECTED_EDGE_TYPE",
+            )
         if stage.kind != "follow" and (stage.start is not None or stage.end is not None):
-            raise ValueError(f"{stage.kind} stage {stage.name!r} cannot have score bounds")
+            raise InvalidQueryError(
+                f"{stage.kind} stage {stage.name!r} cannot have score bounds",
+                reason="UNEXPECTED_SCORE_BOUNDS",
+            )
         if stage.kind == "follow" and (len(stage.sources) != 1 or not stage.edge_type):
-            raise ValueError(f"follow stage {stage.name!r} requires one source and edge_type")
+            raise InvalidQueryError(
+                f"follow stage {stage.name!r} requires one source and edge_type",
+                reason="INVALID_FOLLOW_STAGE",
+            )
         if stage.kind in SET_KINDS and len(stage.sources) != 2:
-            raise ValueError(f"{stage.kind} stage {stage.name!r} requires exactly two sources")
+            raise InvalidQueryError(
+                f"{stage.kind} stage {stage.name!r} requires exactly two sources",
+                reason="INVALID_SET_STAGE_SOURCES",
+            )
         if stage.kind != "follow" and stage.scores:
-            raise ValueError(f"{stage.kind} stage {stage.name!r} cannot request scores")
+            raise InvalidQueryError(
+                f"{stage.kind} stage {stage.name!r} cannot request scores",
+                reason="UNEXPECTED_SCORES",
+            )
 
     start_stages = [stage for stage in stage_list if stage.kind == "start"]
     if len(start_stages) != 1:
-        raise ValueError("query must contain exactly one start stage")
+        raise InvalidQueryError(
+            "query must contain exactly one start stage", reason="INVALID_START_STAGE_COUNT"
+        )
 
     stage_map = {stage.name: stage for stage in stage_list}
     topological_stage_names(stage_map)
+    _check_max_depth(stage_map)
     return stage_map
 
 
@@ -164,7 +216,10 @@ def topological_stage_names(stages: dict[str, QueryStage]) -> list[str]:
     for stage in stages.values():
         for source in stage.sources:
             if source not in stages:
-                raise ValueError(f"Stage {stage.name!r} depends on missing stage {source!r}")
+                raise InvalidQueryError(
+                    f"Stage {stage.name!r} depends on missing stage {source!r}",
+                    reason="MISSING_PARENT_STAGE",
+                )
             indegree[stage.name] += 1
             dependents[source].append(stage.name)
 
@@ -179,5 +234,26 @@ def topological_stage_names(stages: dict[str, QueryStage]) -> list[str]:
                 ready.append(dependent)
 
     if len(ordered) != len(stages):
-        raise ValueError("Query stages contain a cycle")
+        raise InvalidQueryError("Query stages contain a cycle", reason="CYCLE")
     return ordered
+
+
+def _check_max_depth(stages: dict[str, QueryStage]) -> None:
+    """Raise MaxDepthExceededError if any stage's dependency chain is too long.
+
+    Assumes `stages` is already known acyclic (topological_stage_names has run),
+    so this plain recursion over sources terminates without a visited guard.
+    """
+    depth: dict[str, int] = {}
+
+    def stage_depth(name: str) -> int:
+        if name not in depth:
+            sources = stages[name].sources
+            depth[name] = 1 + max((stage_depth(s) for s in sources), default=-1)
+        return depth[name]
+
+    deepest = max((stage_depth(name) for name in stages), default=0)
+    if deepest > MAX_QUERY_DEPTH:
+        raise MaxDepthExceededError(
+            f"query depth {deepest} exceeds the maximum of {MAX_QUERY_DEPTH}"
+        )

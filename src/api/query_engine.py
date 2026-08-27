@@ -9,13 +9,36 @@ from typing import Any
 from src.graph import NutmegGraph
 from src.query_wire import QueryStage, load_query_wire, topological_stage_names
 from src.query_response import QueryResult, load_query_response
+from src.status_codes import ResourceLimitExceededError
+
+# Defaults for QueryExecutor's two RESOURCE_LIMIT_EXCEEDED guards. Both are
+# constructor overrides (not just module constants) so tests can exercise the
+# limit without either mocking time or building a huge graph.
+DEFAULT_QUERY_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_RESULT_NODES = 5_000
 
 
 class QueryExecutor:
-    def __init__(self, graph: NutmegGraph):
+    def __init__(
+        self,
+        graph: NutmegGraph,
+        *,
+        timeout_seconds: float = DEFAULT_QUERY_TIMEOUT_SECONDS,
+        max_result_nodes: int = DEFAULT_MAX_RESULT_NODES,
+    ):
         self.graph = graph
+        self.timeout_seconds = timeout_seconds
+        self.max_result_nodes = max_result_nodes
 
     async def execute(self, query_plan: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await asyncio.wait_for(self._execute(query_plan), self.timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise ResourceLimitExceededError(
+                f"query exceeded the {self.timeout_seconds}s time limit", reason="TIMEOUT"
+            ) from exc
+
+    async def _execute(self, query_plan: dict[str, Any]) -> dict[str, Any]:
         plan = load_query_wire(query_plan)
         stages = plan.stages
         start_nodes = plan.start_nodes
@@ -39,6 +62,7 @@ class QueryExecutor:
                 if stage.degrees or stage.attributes:
                     self._request_metadata(metadata_requests, values, stage)
 
+        self._check_result_size(metadata_requests)
         nodes = await self._collect_nodes(metadata_requests)
         scores = {
             name: scores_by_stage[name]
@@ -51,6 +75,17 @@ class QueryExecutor:
             scores=scores,
         ).to_dict()
         return load_query_response(response, plan=plan).to_dict()
+
+    def _check_result_size(self, metadata_requests: dict[str, dict[str, bool]]) -> None:
+        """Guards the _collect_nodes fan-out below: without this, a plan whose
+        stages touch more nodes than a client can reasonably consume still pays
+        the full per-node lookup cost before the response is ever thrown away."""
+        if len(metadata_requests) > self.max_result_nodes:
+            raise ResourceLimitExceededError(
+                f"query result of {len(metadata_requests)} nodes exceeds the "
+                f"limit of {self.max_result_nodes}",
+                reason="RESULT_TOO_LARGE",
+            )
 
     async def _execute_stage(
         self,
