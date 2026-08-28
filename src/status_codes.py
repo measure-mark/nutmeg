@@ -3,7 +3,7 @@
 The top-level list is kept deliberately short -- clients switch on `code`.
 Where more detail is useful without growing that list, an error also carries
 a `reason`: a code-specific string (e.g. INVALID_QUERY's DUPLICATE_STAGE_NAME).
-See README.md's Status Codes section for the full, documented list.
+See docs/status_codes.md for the full, documented list.
 """
 
 from __future__ import annotations
@@ -21,11 +21,20 @@ class StatusCode(str, Enum):
     UNAUTHORIZED = "UNAUTHORIZED"
     BULK_PARTIAL_FAILURE = "BULK_PARTIAL_FAILURE"
     RESOURCE_LIMIT_EXCEEDED = "RESOURCE_LIMIT_EXCEEDED"
+    DATA_ERROR = "DATA_ERROR"
+    # Earns a top-level code despite the "keep this list short" rule above: it is
+    # the only code that blames the *peer* rather than the caller's request, so
+    # folding it into INVALID_QUERY would tell a client its own input was bad when
+    # the truth is the other end sent something unusable.
+    INVALID_RESPONSE = "INVALID_RESPONSE"
 
 
 # HTTP status each code maps to at the FastAPI boundary. BULK_PARTIAL_FAILURE
 # has no entry -- bulk-load responses carry it as a 200 body field, not a
-# raised error, since the request itself still succeeded.
+# raised error, since the request itself still succeeded. RESOURCE_LIMIT_EXCEEDED's
+# entry here is a fallback (see _RESOURCE_LIMIT_HTTP_STATUS below for its
+# reason-specific mappings) -- 429 stays free for a future RATE_LIMITED reason,
+# the one HTTP status 429 ("Too Many Requests") actually describes.
 HTTP_STATUS: dict[StatusCode, int] = {
     StatusCode.SERVICE_UNAVAILABLE: 503,
     StatusCode.NODE_NOT_FOUND: 404,
@@ -33,6 +42,19 @@ HTTP_STATUS: dict[StatusCode, int] = {
     StatusCode.INVALID_QUERY: 400,
     StatusCode.UNAUTHORIZED: 401,
     StatusCode.RESOURCE_LIMIT_EXCEEDED: 429,
+    StatusCode.DATA_ERROR: 409,
+    # 500: the only way this reaches the HTTP boundary is QueryExecutor's check of
+    # the response it just built (see query_engine._execute), i.e. the server
+    # produced something invalid. That is a server fault, not a bad request.
+    StatusCode.INVALID_RESPONSE: 500,
+}
+
+# RESOURCE_LIMIT_EXCEEDED reasons that have a more specific HTTP status than the
+# 429 fallback above: 504 for a server-side execution timeout, 413 for a result
+# known to be too large to return.
+_RESOURCE_LIMIT_HTTP_STATUS: dict[str, int] = {
+    "TIMEOUT": 504,
+    "RESULT_TOO_LARGE": 413,
 }
 
 
@@ -70,6 +92,8 @@ class NutmegError(ValueError):
 
     @property
     def http_status(self) -> int:
+        if self.code == StatusCode.RESOURCE_LIMIT_EXCEEDED and self.reason in _RESOURCE_LIMIT_HTTP_STATUS:
+            return _RESOURCE_LIMIT_HTTP_STATUS[self.reason]
         return HTTP_STATUS[self.code]
 
 
@@ -111,3 +135,26 @@ class ResourceLimitExceededError(NutmegError):
     """
 
     code = StatusCode.RESOURCE_LIMIT_EXCEEDED
+
+
+class InvalidResponseError(NutmegError):
+    """A protocol peer sent a response this end cannot accept.
+
+    reason distinguishes INVALID_RESPONSE_JSON (the body didn't parse at all)
+    from INVALID_RESPONSE_DOCUMENT (it parsed but breaks the response contract
+    in src/query_response.py). Unlike every other code here, this one is about
+    the sender's output rather than the caller's input -- the client raises it
+    when the server misbehaves, and the server raises it against itself when the
+    response it assembled fails its own outgoing check.
+    """
+
+    code = StatusCode.INVALID_RESPONSE
+
+
+class DataError(NutmegError):
+    """The graph rejected an otherwise well-formed write because of the data's
+    own state -- e.g. reason=NODE_TYPE_CONFLICT for re-adding a node under a
+    different (immutable) type. Distinct from INVALID_QUERY, which is about a
+    malformed request rather than a conflict with existing data."""
+
+    code = StatusCode.DATA_ERROR

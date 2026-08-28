@@ -14,6 +14,7 @@ import redis.asyncio as redis
 from fastmcp import FastMCP
 
 from src.api.query_engine import QueryExecutor
+from src.error_adapter import status_coded
 from src.graph import NutmegGraph
 import numpy as np
 
@@ -24,7 +25,14 @@ graph = NutmegGraph(_redis)
 mcp = FastMCP("nutmeg", instructions="Read access to the Nutmeg graph.")
 
 
+# Every tool is wrapped in @status_coded: an MCP client sees only str(exc), so the
+# `[CODE]` (or `[CODE:REASON]`) prefix a NutmegError prints is the whole of the
+# status-code contract on this surface. Without it a graph-layer error (a malformed
+# node_id, say) would reach the client as uncoded text. See docs/status_codes.md.
+
+
 @mcp.tool()
+@status_coded
 async def get_node(node_id: str) -> dict:
     """A node's type, attributes, and out-degree.
 
@@ -34,11 +42,13 @@ async def get_node(node_id: str) -> dict:
 
 
 @mcp.tool()
+@status_coded
 async def get_meta_graph() -> dict:
     """Return live node-type and typed-edge counts for planning graph traversals."""
     return await graph.get_meta_graph()
 
 @mcp.tool()
+@status_coded
 async def run_query(query_plan: dict) -> dict:
     """Execute a graph query plan and return stage results and requested metadata.
 

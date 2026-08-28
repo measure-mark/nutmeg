@@ -1,5 +1,7 @@
 """Tests for the query wire contract shared by client and server."""
 
+import sys
+
 import pytest
 
 from src.query_wire import MAX_QUERY_DEPTH, load_query_wire
@@ -115,6 +117,21 @@ def test_query_wire_rejects_a_plan_one_stage_past_the_maximum_depth():
         load_query_wire(_chained_follow_wire(MAX_QUERY_DEPTH + 1))
 
     assert exc.value.code == StatusCode.MAX_DEPTH_EXCEEDED
+
+
+def test_deeply_chained_wire_declared_deepest_first_does_not_recurse():
+    """Regression: depth used to be computed by Python-recursing over each
+    stage's sources. Declared deepest-stage-first (reverse topological order),
+    that recursion started before memoization had anything cached, so a chain
+    longer than sys.getrecursionlimit() raised RecursionError instead of the
+    intended MaxDepthExceededError. A wire document's field order must not
+    determine whether a client gets a stable application error or a crash."""
+    depth = sys.getrecursionlimit() + 500
+    wire = _chained_follow_wire(depth)
+    wire["stage_specs"] = list(reversed(wire["stage_specs"]))
+
+    with pytest.raises(MaxDepthExceededError):
+        load_query_wire(wire)
 
 
 def test_wire_loader_rejects_unknown_stage_fields():

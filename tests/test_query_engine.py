@@ -348,9 +348,9 @@ async def test_symmetric_difference_excludes_nodes_present_in_both_inputs():
 
 
 async def test_result_larger_than_max_result_nodes_raises_resource_limit_exceeded():
-    """Contract: a plan whose metadata-requesting stages touch more nodes than
-    max_result_nodes is rejected with RESOURCE_LIMIT_EXCEEDED/RESULT_TOO_LARGE
-    instead of silently returning a huge response."""
+    """Contract: a plan whose stages return more entries than max_result_nodes is
+    rejected with RESOURCE_LIMIT_EXCEEDED/RESULT_TOO_LARGE instead of silently
+    returning a huge response."""
     executor = QueryExecutor(await make_graph(), max_result_nodes=1)
 
     with pytest.raises(ResourceLimitExceededError) as exc:
@@ -366,9 +366,60 @@ async def test_result_larger_than_max_result_nodes_raises_resource_limit_exceede
     assert exc.value.reason == "RESULT_TOO_LARGE"
 
 
+async def test_result_size_is_checked_even_without_metadata_or_scores_requested():
+    """Regression: the limit used to only count nodes in stages requesting
+    degrees/attributes, so a plan with neither could return an arbitrarily large
+    `stages` payload while reporting zero size. Now every stage's node list
+    counts, metadata or not."""
+    executor = QueryExecutor(await make_graph(), max_result_nodes=1)
+
+    with pytest.raises(ResourceLimitExceededError) as exc:
+        await executor.execute(
+            {
+                "wire_version": 1,
+                "start_nodes": ["viewer", "alt_viewer"],
+                "stage_specs": [{"name": "start_stage", "kind": "start"}],
+            }
+        )
+
+    assert exc.value.reason == "RESULT_TOO_LARGE"
+
+
+async def test_result_size_counts_requested_scores_too():
+    """A large score map is response data just like a large stage's node list --
+    scores from a scores-requesting stage count toward the same limit.
+
+    The budget is exactly the stage-entry total (1 start + 3 followed), so the
+    plan is rejected only because of its 3 score entries. An earlier budget of 2
+    was already blown by the stage entries alone, and so passed whether or not
+    scores were counted at all."""
+    executor = QueryExecutor(await make_graph(), max_result_nodes=4)
+
+    with pytest.raises(ResourceLimitExceededError) as exc:
+        await executor.execute(
+            {
+                "wire_version": 1,
+                "start_nodes": ["viewer"],
+                "stage_specs": [
+                    {"name": "start_stage", "kind": "start"},
+                    {
+                        "name": "connected",
+                        "kind": "follow",
+                        "sources": ["start_stage"],
+                        "edge_type": "connected_to",
+                        "scores": True,
+                    },
+                ],
+            }
+        )
+
+    assert exc.value.reason == "RESULT_TOO_LARGE"
+
+
 async def test_result_within_max_result_nodes_succeeds():
-    """Boundary: exactly max_result_nodes nodes is not rejected."""
-    executor = QueryExecutor(await make_graph(), max_result_nodes=2)
+    """Boundary: exactly max_result_nodes entries is not rejected. Two start-stage
+    entries plus their two node documents is four, so the budget here is four."""
+    executor = QueryExecutor(await make_graph(), max_result_nodes=4)
 
     result = await executor.execute(
         {
@@ -379,6 +430,25 @@ async def test_result_within_max_result_nodes_succeeds():
     )
 
     assert set(result["nodes"]) == {"viewer", "alt_viewer"}
+
+
+async def test_result_size_counts_requested_node_documents_too():
+    """Regression: the budget once counted only stage and score entries, so a plan
+    requesting attributes/degrees could return a node document per unique node for
+    free -- roughly double the entries the limit implies, and the largest entries
+    of the three, since attributes are arbitrary JSON."""
+    executor = QueryExecutor(await make_graph(), max_result_nodes=3)
+
+    with pytest.raises(ResourceLimitExceededError) as exc:
+        await executor.execute(
+            {
+                "wire_version": 1,
+                "start_nodes": ["viewer", "alt_viewer"],
+                "stage_specs": [{"name": "start_stage", "kind": "start", "attributes": True}],
+            }
+        )
+
+    assert exc.value.reason == "RESULT_TOO_LARGE"
 
 
 class _SlowGraph:

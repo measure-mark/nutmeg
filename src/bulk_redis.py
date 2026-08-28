@@ -3,12 +3,39 @@
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from src.graph import GraphWriteScripts
+import redis.exceptions
+
+from src.graph_writes import GraphWriteScripts
 from src.status_codes import InvalidQueryError, StatusCode
 
 
 DEFAULT_BATCH_SIZE = 5_000
 MAX_BATCH_SIZE = 10_000
+
+
+class BulkLoadInterruptedError(redis.exceptions.RedisError):
+    """A Redis-level failure (lost connection, etc.) interrupted a load partway
+    through a batch. Deliberately not caught and turned into a per-record
+    `errors` entry: unlike a rejected record (bad type, missing node), we can't
+    tell which -- if any -- of the in-flight batch's writes landed, so we stop
+    rather than risk silently skipping over an ambiguous batch and reporting a
+    misleadingly clean partial result.
+
+    `nodes_loaded`/`edges_loaded`/`errors` on this exception are exactly the
+    result of every batch that completed *before* the one that failed -- since
+    load() processes batches strictly in order and stops here, that boundary is
+    the caller's resume point. Every write is an idempotent upsert, so it's
+    always safe to retry starting from (or even before) that point.
+    """
+
+    def __init__(self, cause: Exception, nodes_loaded: int, edges_loaded: int, errors: list):
+        super().__init__(
+            f"bulk load interrupted after nodes_loaded={nodes_loaded} "
+            f"edges_loaded={edges_loaded}: {cause}"
+        )
+        self.nodes_loaded = nodes_loaded
+        self.edges_loaded = edges_loaded
+        self.errors = errors
 
 
 class BulkRedisLoader:
@@ -32,7 +59,7 @@ class BulkRedisLoader:
     ) -> dict[str, Any]:
         if not 1 <= batch_size <= MAX_BATCH_SIZE:
             raise InvalidQueryError(
-                f"batch_size must be between 1 and {MAX_BATCH_SIZE}",
+                f"batch_size {batch_size} is outside the allowed range of 1 to {MAX_BATCH_SIZE}",
                 reason="INVALID_BATCH_SIZE",
             )
 
@@ -45,14 +72,22 @@ class BulkRedisLoader:
             "edges_loaded": 0,
             "errors": [],
         }
-        for start in range(0, len(node_records), batch_size):
-            await self._load_node_batch(
-                node_records[start : start + batch_size], start, result
-            )
-        for start in range(0, len(edge_records), batch_size):
-            await self._load_edge_batch(
-                edge_records[start : start + batch_size], start, result
-            )
+        try:
+            for start in range(0, len(node_records), batch_size):
+                await self._load_node_batch(
+                    node_records[start : start + batch_size], start, result
+                )
+            for start in range(0, len(edge_records), batch_size):
+                await self._load_edge_batch(
+                    edge_records[start : start + batch_size], start, result
+                )
+        except redis.exceptions.RedisError as exc:
+            # Stop immediately -- do not attempt further batches. See
+            # BulkLoadInterruptedError's docstring for why.
+            raise BulkLoadInterruptedError(
+                exc, result["nodes_loaded"], result["edges_loaded"], result["errors"]
+            ) from exc
+
         result["code"] = (
             StatusCode.BULK_PARTIAL_FAILURE.value if result["errors"] else StatusCode.OK.value
         )

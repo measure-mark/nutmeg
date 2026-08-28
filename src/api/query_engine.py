@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter, deque
+from dataclasses import dataclass
 from typing import Any
 
 from src.graph import NutmegGraph
@@ -16,6 +17,23 @@ from src.status_codes import ResourceLimitExceededError
 # limit without either mocking time or building a huge graph.
 DEFAULT_QUERY_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_RESULT_NODES = 5_000
+
+
+@dataclass
+class _NodeFields:
+    """Which of a node's two optional response fields -- its stored `attributes`
+    and its `degree` (out-edge counts) -- at least one stage asked to have
+    attached to it. This is "metadata" in the sense used elsewhere in this
+    module: everything about a node beyond its bare id, i.e. everything a stage
+    can opt into via its `attributes`/`degrees` flags (see QueryStage and
+    docs/mcp_server.md). A node can show up in several stages requesting
+    different fields (e.g. one stage wants only attributes, another wants only
+    degree) -- flags accumulate via _request_node_fields rather than being
+    decided per-stage, since the response's `nodes` map has one entry per node,
+    not one per (stage, node) pair."""
+
+    want_attributes: bool = False
+    want_degree: bool = False
 
 
 class QueryExecutor:
@@ -45,7 +63,9 @@ class QueryExecutor:
 
         values_by_stage: dict[str, list[str]] = {}
         scores_by_stage: dict[str, dict[str, float]] = {}
-        metadata_requests: dict[str, dict[str, bool]] = {}
+        # node_id -> which optional fields (see _NodeFields) to include for it in
+        # the response's `nodes` map -- built up as stages execute, below.
+        node_fields: dict[str, _NodeFields] = {}
 
         for level in self._topological_stage_levels(stages):
             tasks = {
@@ -60,10 +80,10 @@ class QueryExecutor:
                 values_by_stage[stage_name] = values
                 scores_by_stage[stage_name] = score_map
                 if stage.degrees or stage.attributes:
-                    self._request_metadata(metadata_requests, values, stage)
+                    self._request_node_fields(node_fields, values, stage)
 
-        self._check_result_size(metadata_requests)
-        nodes = await self._collect_nodes(metadata_requests)
+        self._check_result_size(values_by_stage, scores_by_stage, stages, node_fields)
+        nodes = await self._collect_nodes(node_fields)
         scores = {
             name: scores_by_stage[name]
             for name, stage in stages.items()
@@ -76,14 +96,35 @@ class QueryExecutor:
         ).to_dict()
         return load_query_response(response, plan=plan).to_dict()
 
-    def _check_result_size(self, metadata_requests: dict[str, dict[str, bool]]) -> None:
-        """Guards the _collect_nodes fan-out below: without this, a plan whose
-        stages touch more nodes than a client can reasonably consume still pays
-        the full per-node lookup cost before the response is ever thrown away."""
-        if len(metadata_requests) > self.max_result_nodes:
+    def _check_result_size(
+        self,
+        values_by_stage: dict[str, list[str]],
+        scores_by_stage: dict[str, dict[str, float]],
+        stages: dict[str, QueryStage],
+        node_fields: dict[str, _NodeFields],
+    ) -> None:
+        """Guards the response actually returned to the client: every entry in it.
+
+        That means all three of the response's maps -- each stage's node list, each
+        requested-scores stage's score map, and the `nodes` map of requested node
+        documents. A node document is the largest entry of the three (attributes are
+        arbitrary JSON), so leaving it out would let a plan requesting
+        attributes/degrees return roughly twice the entries the limit implies.
+
+        Runs before the _collect_nodes fan-out below, so an oversized plan is
+        rejected before paying for per-node lookups whose result would only be
+        thrown away -- node_fields is complete by now even though `nodes` isn't,
+        since it has one key per node that will appear there.
+        """
+        stage_entries = sum(len(values) for values in values_by_stage.values())
+        score_entries = sum(
+            len(scores_by_stage[name]) for name, stage in stages.items() if stage.scores
+        )
+        total = stage_entries + score_entries + len(node_fields)
+        if total > self.max_result_nodes:
             raise ResourceLimitExceededError(
-                f"query result of {len(metadata_requests)} nodes exceeds the "
-                f"limit of {self.max_result_nodes}",
+                f"query result of {total} stage, score, and node-document entries "
+                f"exceeds the limit of {self.max_result_nodes}",
                 reason="RESULT_TOO_LARGE",
             )
 
@@ -173,33 +214,34 @@ class QueryExecutor:
                     values.append(node)
         return values
 
-    def _request_metadata(
+    def _request_node_fields(
         self,
-        metadata_requests: dict[str, dict[str, bool]],
+        node_fields: dict[str, _NodeFields],
         node_ids: list[str],
         stage: QueryStage,
     ) -> None:
         for node_id in node_ids:
-            request = metadata_requests.setdefault(
-                node_id, {"degrees": False, "attributes": False}
-            )
-            request["degrees"] = request["degrees"] or stage.degrees
-            request["attributes"] = request["attributes"] or stage.attributes
+            fields = node_fields.setdefault(node_id, _NodeFields())
+            fields.want_attributes = fields.want_attributes or stage.attributes
+            fields.want_degree = fields.want_degree or stage.degrees
 
-    async def _collect_nodes(
-        self, metadata_requests: dict[str, dict[str, bool]]
-    ) -> dict[str, dict]:
+    async def _collect_nodes(self, node_fields: dict[str, _NodeFields]) -> dict[str, dict]:
+        """Builds the response's `nodes` map: one NutmegGraph.get_node() call per
+        node that at least one stage requested attributes and/or degree for (see
+        _NodeFields), trimmed down to just the fields that node's requests
+        actually asked for. A node's bare id already lives in `stages`; this is
+        purely the opt-in extra detail about it."""
         nodes: dict[str, dict] = {}
-        node_ids = list(metadata_requests)
+        node_ids = list(node_fields)
         pulled_nodes = await asyncio.gather(
             *(self.graph.get_node(node_id) for node_id in node_ids)
         )
         for node_id, node in zip(node_ids, pulled_nodes):
-            flags = metadata_requests[node_id]
+            fields = node_fields[node_id]
             compact = {"node_type": node["node_type"]}
-            if flags["attributes"]:
+            if fields.want_attributes:
                 compact["attributes"] = node.get("attributes", {})
-            if flags["degrees"]:
+            if fields.want_degree:
                 compact["degree"] = node.get("degree")
             nodes[node_id] = compact
         return nodes

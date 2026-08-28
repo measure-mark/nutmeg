@@ -8,7 +8,8 @@ from typing import Any
 import httpx
 
 from src.bulk_redis import DEFAULT_BATCH_SIZE
-from src.query_wire import QueryStage, load_query_wire
+from src.status_codes import InvalidQueryError, InvalidResponseError
+from src.query_wire import QueryStage, load_query_wire, load_wire_json
 from src.query_response import QueryResult, load_query_response
 
 
@@ -27,10 +28,12 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
 class NutmegHTTPError(RuntimeError):
     """Raised for any non-2xx Nutmeg response.
 
-    code/reason surface the server's status code (see README.md's Status Codes
-    section) when the body carries one; both are None for a plain-text error
-    body or one predating that contract, so callers should not assume either
-    is set.
+    code/reason surface the server's status code (see docs/status_codes.md)
+    when the body carries one; both are None for a plain-text error body or one
+    predating that contract, so callers should not assume either is set.
+
+    Query-builder mistakes caught before a request is ever sent raise
+    InvalidQueryError instead -- same `code`/`reason` fields, no HTTP status.
     """
 
     def __init__(self, status_code: int, detail: Any, *, code: str | None = None, reason: str | None = None):
@@ -151,7 +154,14 @@ class NutmegClient:
             raise NutmegHTTPError(
                 408, f"request to {url} timed out", code="RESOURCE_LIMIT_EXCEEDED", reason="TIMEOUT"
             ) from exc
-        return response.json() if response.content else None
+        if not response.content:
+            return None
+        # A 2xx whose body isn't JSON is the server breaking the contract, not the
+        # caller sending bad input -- coded INVALID_RESPONSE so a client can tell
+        # the two apart without inspecting exception classes.
+        return load_wire_json(
+            response.text, error=InvalidResponseError, reason="INVALID_RESPONSE_JSON"
+        )
 
 
 class Stage:
@@ -255,7 +265,9 @@ class NutmegQuery:
         self.client = client
         self.start_nodes = list(dict.fromkeys(_as_node_list(start_nodes)))
         if not self.start_nodes:
-            raise ValueError("query must contain at least one start node")
+            raise InvalidQueryError(
+                "query must contain at least one start node", reason="MISSING_START_NODES"
+            )
         self._stages: dict[str, QueryStage] = {
             name: QueryStage(
                 name=name,
@@ -310,7 +322,7 @@ class NutmegQuery:
 
     @classmethod
     def from_json(cls, client: NutmegClient, data: str) -> "NutmegQuery":
-        return cls.from_dict(client, json.loads(data))
+        return cls.from_dict(client, load_wire_json(data))
 
     def _add_follow_stage(
         self,
@@ -351,7 +363,9 @@ class NutmegQuery:
     ) -> Stage:
         stage_names = tuple(self._stage_name(stage) for stage in stages)
         if len(stage_names) != 2:
-            raise ValueError(f"{kind} requires exactly two stages")
+            raise InvalidQueryError(
+                f"{kind} requires exactly two stages", reason="INVALID_SET_STAGE_SOURCES"
+            )
         stage_name = name or self._next_name(kind)
         self._add_stage(
             QueryStage(
@@ -366,11 +380,14 @@ class NutmegQuery:
 
     def _add_stage(self, spec: QueryStage) -> None:
         if spec.name in self._stages:
-            raise ValueError(f"Stage {spec.name!r} already exists")
+            raise InvalidQueryError(
+                f"Stage {spec.name!r} already exists", reason="DUPLICATE_STAGE_NAME"
+            )
         for source in spec.sources:
             if source not in self._stages:
-                raise ValueError(
-                    f"Stage {spec.name!r} depends on missing stage {source!r}"
+                raise InvalidQueryError(
+                    f"Stage {spec.name!r} depends on missing stage {source!r}",
+                    reason="MISSING_PARENT_STAGE",
                 )
         self._stages[spec.name] = spec
 
@@ -385,6 +402,9 @@ class NutmegQuery:
     def _stage_name(self, stage: str | Stage) -> str:
         if isinstance(stage, Stage):
             if stage.query is not self:
-                raise ValueError(f"Stage {stage.name!r} belongs to a different query")
+                raise InvalidQueryError(
+                    f"Stage {stage.name!r} belongs to a different query",
+                    reason="FOREIGN_STAGE",
+                )
             return stage.name
         return stage

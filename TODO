@@ -1,4 +1,6 @@
-QDRant syncing
+Bulk load rollback/resume. This would be useful as a product, but not in the current toy state
+
+Part of Nutmeg or part of AllSpice?  QDRant syncing
 
 1. Traversal tool for MCP
 1a. Seek out Materialize the metagraph, and perform traverals and append pairs, then write arbitrary length pairs to make the graph traversalable. 

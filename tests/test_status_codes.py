@@ -4,9 +4,11 @@ import pytest
 
 from src.status_codes import (
     HTTP_STATUS,
+    DataError,
     InvalidQueryError,
     NodeNotFoundError,
     NutmegError,
+    ResourceLimitExceededError,
 )
 
 
@@ -43,6 +45,23 @@ def test_every_raisable_code_has_an_http_status():
     status, or api/server.py's exception handler would KeyError on it."""
     for subclass in NutmegError.__subclasses__():
         assert subclass.code in HTTP_STATUS, f"{subclass.__name__} has no HTTP mapping"
+
+
+def test_resource_limit_exceeded_http_status_is_reason_aware():
+    """Design decision: HTTP 429 means "too many requests" (rate limiting), which
+    describes neither a timeout nor an oversized result -- each RESOURCE_LIMIT_EXCEEDED
+    reason maps to the HTTP status that actually describes it, with 429 kept free
+    for a future RATE_LIMITED reason."""
+    assert ResourceLimitExceededError("slow", reason="TIMEOUT").http_status == 504
+    assert ResourceLimitExceededError("big", reason="RESULT_TOO_LARGE").http_status == 413
+    assert ResourceLimitExceededError("other", reason="SOMETHING_ELSE").http_status == 429
+    assert ResourceLimitExceededError("no reason").http_status == 429
+
+
+def test_data_error_maps_to_conflict():
+    """A DATA_ERROR is a conflict with existing data, not a malformed request or
+    a missing resource -- 409, distinct from INVALID_QUERY's 400."""
+    assert DataError("node 'ada' already has type 'player'").http_status == 409
 
 
 def test_nutmeg_error_is_a_value_error():

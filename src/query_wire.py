@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from src.status_codes import InvalidQueryError, MaxDepthExceededError
+from src.status_codes import InvalidQueryError, MaxDepthExceededError, NutmegError
+
+
+def load_wire_json(
+    data: str,
+    *,
+    error: type[NutmegError] = InvalidQueryError,
+    reason: str = "INVALID_JSON",
+) -> Any:
+    """json.loads for a wire document supplied as text.
+
+    A decode failure becomes a coded NutmegError rather than an uncoded
+    JSONDecodeError: an entry point taking a document as a string owes callers
+    the same code/reason contract as one taking it as a dict (see
+    docs/status_codes.md). Which code depends on whose document it is -- a
+    request the caller supplied (the INVALID_QUERY default) or a response a peer
+    sent back (InvalidResponseError/INVALID_RESPONSE_JSON).
+    """
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise error(f"could not parse JSON: {exc}", reason=reason) from exc
 
 
 SET_KINDS = {"union", "intersect", "subtract", "symmetric_difference"}
@@ -26,7 +48,7 @@ ALLOWED_STAGE_FIELDS = {
 # Longest allowed chain of stage dependencies (a stage's own depth is
 # 1 + max(source depths)). Guards against a plan whose sequential follow
 # stages would force an unbounded number of Redis round trips.
-MAX_QUERY_DEPTH = 20
+MAX_QUERY_DEPTH = 11
 
 
 @dataclass(frozen=True)
@@ -241,19 +263,39 @@ def topological_stage_names(stages: dict[str, QueryStage]) -> list[str]:
 def _check_max_depth(stages: dict[str, QueryStage]) -> None:
     """Raise MaxDepthExceededError if any stage's dependency chain is too long.
 
-    Assumes `stages` is already known acyclic (topological_stage_names has run),
-    so this plain recursion over sources terminates without a visited guard.
+    A standard iterative depth-first search over each stage's sources, 3-color
+    marked (white/gray/black) so a cycle is caught by this pass alone rather than
+    relying only on topological_stage_names's Kahn's-algorithm check above --
+    belt and suspenders, since the two use unrelated algorithms. Iterative (an
+    explicit stack, not Python call recursion) so a long, deliberately malicious
+    stage chain fails with MaxDepthExceededError instead of RecursionError --
+    unlike recursion, this doesn't care what order stages were declared in.
     """
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {name: WHITE for name in stages}
     depth: dict[str, int] = {}
 
-    def stage_depth(name: str) -> int:
-        if name not in depth:
-            sources = stages[name].sources
-            depth[name] = 1 + max((stage_depth(s) for s in sources), default=-1)
-        return depth[name]
-
-    deepest = max((stage_depth(name) for name in stages), default=0)
-    if deepest > MAX_QUERY_DEPTH:
-        raise MaxDepthExceededError(
-            f"query depth {deepest} exceeds the maximum of {MAX_QUERY_DEPTH}"
-        )
+    for root in stages:
+        if color[root] != WHITE:
+            continue
+        stack = [root]
+        source_iters = {root: iter(stages[root].sources)}
+        color[root] = GRAY
+        while stack:
+            name = stack[-1]
+            source = next(source_iters[name], None)
+            if source is None:
+                depth[name] = 1 + max((depth[s] for s in stages[name].sources), default=-1)
+                if depth[name] > MAX_QUERY_DEPTH:
+                    raise MaxDepthExceededError(
+                        f"query depth {depth[name]} exceeds the maximum of {MAX_QUERY_DEPTH}"
+                    )
+                color[name] = BLACK
+                stack.pop()
+                continue
+            if color[source] == GRAY:
+                raise InvalidQueryError("Query stages contain a cycle", reason="CYCLE")
+            if color[source] == WHITE:
+                color[source] = GRAY
+                source_iters[source] = iter(stages[source].sources)
+                stack.append(source)
