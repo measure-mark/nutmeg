@@ -12,13 +12,17 @@ local autoreload during development.
 import os
 
 import redis.asyncio as redis
+import redis.exceptions
 from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.api.query_engine import QueryExecutor
 from src.bulk_redis import BulkRedisLoader, DEFAULT_BATCH_SIZE
+from src.error_adapter import as_nutmeg_error
 from src.graph import NutmegGraph
+from src.status_codes import InvalidQueryError
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis.from_url(REDIS_URL)
@@ -28,11 +32,41 @@ bulk_loader = BulkRedisLoader(_redis)
 app = FastAPI(title="nutmeg")
 
 
+# The handlers below are this API's half of the Adapter layer: graph.py,
+# graph_writes.py, and bulk_redis.py deliberately raise plain Python exceptions (see
+# graph_writes.py's module docstring) so they stay usable outside an HTTP context.
+# Which status code each of those exceptions carries is decided once, in
+# src.error_adapter, shared with the MCP server; all that's left here is turning
+# the resulting NutmegError into an HTTP response -- Nutmeg is a client/server
+# protocol with its own `code`/`reason` contract, not a REST resource API, so HTTP
+# status is secondary transport metadata layered on top of exc.to_dict(), not the
+# contract itself.
+#
+# Two handlers cover every case because Starlette dispatches on the first match in
+# the exception's MRO: NutmegError and the graph layer's errors are all ValueErrors,
+# and a lost graph store is a RedisError.
+
+
 @app.exception_handler(ValueError)
-async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-    """NutmegGraph raises ValueError for a malformed/missing node_id -- that's a bad
-    request, not a server error, so it maps to 400 rather than an unhandled 500."""
-    return JSONResponse(status_code=400, content={"detail": str(exc)})
+@app.exception_handler(redis.exceptions.RedisError)
+async def nutmeg_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Every error client code should switch on -- see docs/status_codes.md. Body
+    shape is exc.to_dict(): code, detail, and reason when the code carries one."""
+    err = as_nutmeg_error(exc)
+    return JSONResponse(status_code=err.http_status, content=err.to_dict())
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """A request body FastAPI/Pydantic rejects before a route even runs (missing or
+    wrongly typed fields) -- still carries `code`/`reason`, per this module's
+    docstring, rather than falling back to FastAPI's default unstructured 422 body."""
+    err = InvalidQueryError(
+        f"request body failed validation: {exc.errors()}", reason="INVALID_REQUEST_DOCUMENT"
+    )
+    return JSONResponse(status_code=err.http_status, content=err.to_dict())
 
 
 class NodeCreate(BaseModel):

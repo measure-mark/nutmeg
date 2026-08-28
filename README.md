@@ -1,7 +1,7 @@
 # Nutmeg
 
 Nutmeg is a graph database using Redis for persistence, optimized for set
-operations where edges are strictly ordered (e.g. by date). Nutmeg features both a Python client and an MCP server.  Both expose a rich traversal language that features set operations and branching. 
+operations where edges are *strictly ordered* (e.g. by date). By storing the edges as sorted sets, Nutmeg trades very fast read semantics of existing data for slower writes.  Nutmeg features both a Python client and an MCP server.  Both expose a rich traversal language that features set operations and branching.
 
 It is built for questions like “which connections are within three degrees of separation after subtracting blockers" or 
 “show me the 10 most recent concerts at the House of Blues?” A query stage is
@@ -103,7 +103,7 @@ stages created by `follow_edges()`.
 
 ## MCP
 
-THe MCP server is kept intentionally light, it exposes the Graph's schema, get_node, and the query engine. 
+The MCP server is kept intentionally light, it exposes the Graph's schema, get_node, and the query engine.
 
 Available tools:
 
@@ -150,3 +150,10 @@ guidance. Bulk loading is not exposed through MCP.
 
 All writes are idempotent. A node's type cannot be changed after creation.
 Interactive docs are at `/docs` once the server is running.
+
+## Status Codes
+
+Every error the API, MCP server, and Python client can raise carries a short,
+stable `code` (and often a more specific `reason`) a caller can switch on. See
+[docs/status_codes.md](docs/status_codes.md) for the full list and how each
+surface (API, MCP, Python client) exposes it.

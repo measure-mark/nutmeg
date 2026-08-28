@@ -155,7 +155,8 @@ async def test_client_query_against_live_api_and_redis():
 
         with pytest.raises(NutmegHTTPError) as exc:
             await nutmeg.get_node(f"{prefix}_nope")
-        assert exc.value.status_code == 400
+        assert exc.value.status_code == 404
+        assert exc.value.code == "NODE_NOT_FOUND"
     finally:
         for node_id in nodes.values():
             try:
@@ -211,6 +212,7 @@ async def test_client_bulk_load_against_live_api_and_redis_is_partially_committe
                     "message": f"target node {missing!r} does not exist",
                 },
             ],
+            "code": "BULK_PARTIAL_FAILURE",
         }
         assert (await nutmeg.get_node(existing))["node_type"] == node_type
         assert await nutmeg.get_node(new) == {

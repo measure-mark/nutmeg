@@ -7,6 +7,7 @@ import pytest
 
 from src.bulk_redis import DEFAULT_BATCH_SIZE
 from src.client import NutmegClient, NutmegHTTPError, NutmegQuery, QueryResult
+from src.status_codes import InvalidQueryError, InvalidResponseError, StatusCode
 
 
 @pytest.fixture
@@ -162,6 +163,63 @@ async def test_http_client_extracts_json_and_plain_error_details(fake_http):
     with pytest.raises(NutmegHTTPError) as exc:
         await client.get_node("plain-error")
     assert exc.value.detail == "plain bad"
+
+
+async def test_http_client_surfaces_code_and_reason_when_the_body_carries_them(fake_http):
+    """Contract: a status-coded error body (see status_codes.NutmegError.to_dict)
+    round-trips through NutmegHTTPError.code/reason, not just .detail."""
+    responses, _ = fake_http
+    client = NutmegClient("http://nutmeg.test")
+
+    responses["http://nutmeg.test/nodes/ghost"] = make_http_error(
+        {"code": "NODE_NOT_FOUND", "detail": "node 'ghost' does not exist"}, status_code=404
+    )
+    with pytest.raises(NutmegHTTPError) as exc:
+        await client.get_node("ghost")
+
+    assert exc.value.code == "NODE_NOT_FOUND"
+    assert exc.value.reason is None
+    assert exc.value.detail == "node 'ghost' does not exist"
+
+
+async def test_http_client_error_without_a_code_leaves_code_and_reason_none(fake_http):
+    """A plain-text or pre-status-code error body must not crash .code/.reason
+    access -- callers can check `if exc.code == ...` unconditionally."""
+    responses, _ = fake_http
+    client = NutmegClient("http://nutmeg.test")
+
+    responses["http://nutmeg.test/nodes/plain-error"] = make_http_error("plain bad")
+    with pytest.raises(NutmegHTTPError) as exc:
+        await client.get_node("plain-error")
+
+    assert exc.value.code is None
+    assert exc.value.reason is None
+
+
+async def test_http_client_maps_a_request_timeout_to_resource_limit_exceeded(monkeypatch):
+    """A request that never gets a response (network/server hang) is reported the
+    same way a server-side query timeout is, so callers handle both alike."""
+
+    class TimingOutAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def request(self, method, url, *, params=None, json=None):
+            raise httpx.TimeoutException("timed out", request=httpx.Request(method, url))
+
+    monkeypatch.setattr("src.client.httpx.AsyncClient", TimingOutAsyncClient)
+
+    with pytest.raises(NutmegHTTPError) as exc:
+        await NutmegClient("http://nutmeg.test").get_node("ada")
+
+    assert exc.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert exc.value.reason == "TIMEOUT"
 
 
 def build_set_query(client):
@@ -350,21 +408,96 @@ async def test_duplicate_stage_name_is_rejected():
     query = NutmegClient("http://nutmeg.test").query("ada")
     query.follow_edges("connected_to", name="stage")
 
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(InvalidQueryError, match="already exists") as exc:
         query.follow_edges("blocks", name="stage")
+
+    assert exc.value.reason == "DUPLICATE_STAGE_NAME"
 
 
 async def test_query_builder_rejects_empty_start_nodes():
-    with pytest.raises(ValueError, match="at least one start node"):
+    with pytest.raises(InvalidQueryError, match="at least one start node") as exc:
         NutmegClient("http://nutmeg.test").query([])
+
+    assert exc.value.reason == "MISSING_START_NODES"
 
 
 async def test_query_builder_rejects_stage_handles_from_other_queries():
     query = NutmegClient("http://nutmeg.test").query("ada")
     other_stage = NutmegClient("http://nutmeg.test").query("bob").start
 
-    with pytest.raises(ValueError, match="different query"):
+    with pytest.raises(InvalidQueryError, match="different query") as exc:
         query.start.union(other_stage)
+
+    assert exc.value.reason == "FOREIGN_STAGE"
+
+
+async def test_query_builder_rejects_a_stage_missing_from_this_query():
+    """Contract: a source naming a stage that was never added is INVALID_QUERY /
+    MISSING_PARENT_STAGE -- the same reason the server reports for the equivalent
+    wire document (see query_wire.topological_stage_names)."""
+    query = NutmegClient("http://nutmeg.test").query("ada")
+
+    with pytest.raises(InvalidQueryError, match="missing stage") as exc:
+        query.start.union("never_added")
+
+    assert exc.value.reason == "MISSING_PARENT_STAGE"
+
+
+async def test_successful_response_with_a_non_json_body_is_coded(fake_http):
+    """Regression: a 2xx whose body isn't JSON escaped _request as an uncoded
+    JSONDecodeError. It's the server breaking the contract, so it's
+    INVALID_RESPONSE/INVALID_RESPONSE_JSON like any other unusable response."""
+    responses, _ = fake_http
+    responses["http://nutmeg.test/nodes/ada"] = (200, "<html>gateway</html>")
+
+    with pytest.raises(InvalidResponseError) as exc:
+        await NutmegClient("http://nutmeg.test").get_node("ada")
+
+    assert exc.value.code == StatusCode.INVALID_RESPONSE
+    assert exc.value.reason == "INVALID_RESPONSE_JSON"
+
+
+async def test_malformed_json_is_rejected_with_a_stable_code():
+    """Contract (docs/status_codes.md): an entry point taking a wire document as
+    text owes callers the same code/reason as one taking a dict, so unparseable
+    input is INVALID_QUERY/INVALID_JSON rather than a bare JSONDecodeError."""
+    with pytest.raises(InvalidQueryError) as exc:
+        NutmegClient("http://nutmeg.test").query_from_json("{")
+
+    assert exc.value.code == StatusCode.INVALID_QUERY
+    assert exc.value.reason == "INVALID_JSON"
+
+
+async def test_malformed_query_result_json_is_rejected_with_a_stable_code():
+    """Contract: a response that won't parse is INVALID_RESPONSE, not
+    INVALID_QUERY -- the distinction a caller needs is whether its own input was
+    bad or its server peer misbehaved."""
+    with pytest.raises(InvalidResponseError) as exc:
+        QueryResult.from_json("not json")
+
+    assert exc.value.code == StatusCode.INVALID_RESPONSE
+    assert exc.value.reason == "INVALID_RESPONSE_JSON"
+
+
+async def test_invalid_response_document_is_rejected_with_a_stable_code():
+    """Contract: a response that parses but breaks the wire contract is
+    INVALID_RESPONSE/INVALID_RESPONSE_DOCUMENT, so a client detects a
+    misbehaving peer by code rather than by exception class or message."""
+    with pytest.raises(InvalidResponseError) as exc:
+        QueryResult.from_json('{"wire_version": 1, "stages": "not-a-map", "nodes": {}}')
+
+    assert exc.value.reason == "INVALID_RESPONSE_DOCUMENT"
+
+
+async def test_query_builder_errors_carry_a_status_code_without_a_request():
+    """Contract (docs/status_codes.md): errors caught locally by the builder give
+    callers the same `code` to switch on as a server-side rejection, so they never
+    have to parse a message or branch on where validation happened."""
+    with pytest.raises(InvalidQueryError) as exc:
+        NutmegClient("http://nutmeg.test").query([])
+
+    assert exc.value.code == StatusCode.INVALID_QUERY
+    assert str(exc.value).startswith("[INVALID_QUERY:MISSING_START_NODES]")
 
 
 async def test_get_nodes_before_execute_is_rejected():

@@ -4,3 +4,8 @@ __pycache__/
 
 # Local config, if one shows up later.
 .env
+
+# Local reference material and generated review notes.
+CLAUDE-review.md
+muniplan
+CODEX-review.md

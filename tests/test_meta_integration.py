@@ -63,8 +63,10 @@ async def test_meta_counts_follow_atomic_write_lifecycle():
                 "/edges",
                 json={"source_node": person1, "target_node": f"{prefix}_missing", "edge_type": f"{prefix}_invalid"},
             )
-        assert conflict.status_code == 400
-        assert missing_target.status_code == 400
+        assert conflict.status_code == 409
+        assert conflict.json()["code"] == "DATA_ERROR"
+        assert missing_target.status_code == 404
+        assert missing_target.json()["code"] == "NODE_NOT_FOUND"
         assert (await _request("GET", f"/nodes/{person1}"))["node_type"] == person_type
 
         await asyncio.gather(*[_add_edge(person1, team, member_edge) for _ in range(12)])
