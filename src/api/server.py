@@ -11,7 +11,10 @@ local autoreload during development.
 
 import os
 
-import redis.asyncio as redis
+# Not `import redis.asyncio as redis`: the `import redis.exceptions` below rebinds
+# the bare name `redis` to the top-level (synchronous) package, which would silently
+# turn from_url into the sync client and make every awaited command fail.
+import redis.asyncio
 import redis.exceptions
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,13 +26,18 @@ from src.bulk_redis import BulkRedisLoader, DEFAULT_BATCH_SIZE
 from src.error_adapter import as_nutmeg_error
 from src.graph import NutmegGraph
 from src.status_codes import InvalidQueryError
+from src.telemetry import setup_telemetry
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-_redis = redis.from_url(REDIS_URL)
+_redis = redis.asyncio.from_url(REDIS_URL)
 graph = NutmegGraph(_redis)
 bulk_loader = BulkRedisLoader(_redis)
 
 app = FastAPI(title="nutmeg")
+
+# Here rather than in main.py so `uvicorn src.api.server:app --reload` is traced too.
+# No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set -- see src/telemetry.py.
+setup_telemetry("nutmeg-api", app)
 
 
 # The handlers below are this API's half of the Adapter layer: graph.py,

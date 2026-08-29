@@ -16,13 +16,18 @@ from fastmcp import FastMCP
 from src.api.query_engine import QueryExecutor
 from src.error_adapter import status_coded
 from src.graph import NutmegGraph
-import numpy as np
+from src.telemetry import setup_telemetry
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis.from_url(REDIS_URL)
 graph = NutmegGraph(_redis)
 
 mcp = FastMCP("nutmeg", instructions="Read access to the Nutmeg graph.")
+
+# FastMCP already emits spans for tools/call and friends; all this does is register
+# the SDK that turns them from no-ops into exported traces. No-op unless
+# OTEL_EXPORTER_OTLP_ENDPOINT is set -- see src/telemetry.py.
+setup_telemetry("nutmeg-mcp")
 
 
 # Every tool is wrapped in @status_coded: an MCP client sees only str(exc), so the

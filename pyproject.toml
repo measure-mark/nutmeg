@@ -15,6 +15,14 @@ dependencies = [
 # lupa is fakeredis's optional Lua backend -- needed so fakeredis can run
 # NutmegGraph's atomic mutation scripts.
 dev = ["pytest", "pytest-asyncio", "fakeredis", "lupa"]
+# Optional: src/telemetry.py imports these lazily, so nutmeg runs without them.
+# opentelemetry-api arrives transitively (fastmcp already depends on it).
+otel = [
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-instrumentation-redis",
+]
 
 [tool.pytest.ini_options]
 # The repo is imported with its root on sys.path (`from src...`).

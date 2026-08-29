@@ -1,0 +1,35 @@
+# Sidecar collector for local development: one OTLP endpoint for both nutmeg
+# services, fanning traces out to the otel-gui viewer and metrics out to a
+# Prometheus scrape endpoint on :8889.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  # otel-gui serves its OTLP receiver and its UI on the same port.
+  otlp_http/gui:
+    endpoint: http://otel-gui:4318
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/gui]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]

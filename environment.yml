@@ -13,3 +13,7 @@ dependencies:
       - lupa
       - fastapi
       - uvicorn
+      - opentelemetry-sdk
+      - opentelemetry-exporter-otlp-proto-http
+      - opentelemetry-instrumentation-fastapi
+      - opentelemetry-instrumentation-redis

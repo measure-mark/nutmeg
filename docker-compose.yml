@@ -5,7 +5,9 @@ x-app-build: &app-build
       FROM python:3.14-slim
       WORKDIR /app
       COPY pyproject.toml ./
-      RUN pip install --no-cache-dir redis fastmcp httpx fastapi uvicorn
+      RUN pip install --no-cache-dir redis fastmcp httpx fastapi uvicorn \
+          opentelemetry-sdk opentelemetry-exporter-otlp-proto-http \
+          opentelemetry-instrumentation-fastapi opentelemetry-instrumentation-redis
       COPY src/ ./src/
       COPY main.py mcp_main.py ./
       ENV PYTHONPATH=/app \
@@ -37,6 +39,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       API_PORT: "3879"
+      # Setting the endpoint is what turns telemetry on -- see src/telemetry.py.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: nutmeg-api
     ports:
       - "127.0.0.1:3879:3879"
     depends_on:
@@ -61,6 +66,8 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       MCP_PORT: "3888"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: nutmeg-mcp
     ports:
       - "127.0.0.1:3888:3888"
     depends_on:
@@ -77,6 +84,28 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      # Published so a host-run `python main.py` can export here too.
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      # Prometheus scrape endpoint for the metrics pipeline.
+      - "127.0.0.1:8889:8889"
+    restart: unless-stopped
+
+  otel-gui:
+    # Local trace viewer. Serves its OTLP receiver and its UI on the same port,
+    # so the standard 4318 is left to the collector and the UI is published on
+    # 4320 -- browse http://localhost:4320. Traces are in-memory only.
+    image: ghcr.io/metafab/otel-gui:latest
+    ports:
+      - "127.0.0.1:4320:4318"
     restart: unless-stopped
 
   test-client-integration:

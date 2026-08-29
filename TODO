@@ -1,17 +1,12 @@
+
+AI Project:
+- Seek out Materialize the metagraph, and perform traverals and append pairs, then write arbitrary length pairs to make the graph traversalable. 
+
+May not ever do: Make the replace edge behavior optional at the DB level
+
+1.  Allow named DBs: Move redis space so that multiple graphs can exist, nutmeg:default:... or nutmeg:nba:...
+
 Bulk load rollback/resume. This would be useful as a product, but not in the current toy state
-
-Part of Nutmeg or part of AllSpice?  QDRant syncing
-
-1. Traversal tool for MCP
-1a. Seek out Materialize the metagraph, and perform traverals and append pairs, then write arbitrary length pairs to make the graph traversalable. 
-
-Make the replace edge behavior optional at the DB level
-
-3.  Allow named DBs: Move redis space so that multiple graphs can exist, nutmeg:default:... or nutmeg:nba:...
-
-4. Keep real-Redis integration tests for semantics; use fakeredis only for fast invariant checks
-
-5.  How do we handle lost conections with redis?
 
 --- from code review, client branch (see CLAUDE-review.md STATUS section) ---
 Blocking items are all fixed; these are what's left. Pinned for now.
@@ -50,14 +45,10 @@ Blocking items are all fixed; these are what's left. Pinned for now.
 12. QueryResult.get_nodes raises bare KeyError, get_scores returns {}
     Pick one. KeyError naming the available stages is friendlier for both.
 
-13. Engine does set math in Python, not in Redis
+13. Low priority, but to be tested: Engine does set math in Python, not in Redis
     ZUNIONSTORE/ZINTERSTORE/SDIFF never appear -- _execute_set_op materializes every
     stage as a full Python list in server memory. Defensible v1 (results must be
-    ordered anyway) but the README's "optimized for set operations" describes the
-    zset storage layer, not the engine. Fix the engine or soften the README.
-
-14. _execute_follow fan-out is uncapped and unpipelined
-    One get_neighbors per source node concurrently, each awaiting one zrangebyscore
+    ordered anyway) but the README's "optimized for set operations" describes the zset storage layer, not the engine. Fix the engine or soften the README.  14. _execute_follow fan-out is uncapped and unpipelined One get_neighbors per source node concurrently, each awaiting one zrangebyscore
     per edge type sequentially. A follow over 10k nodes is 10k concurrent round trips,
     no pipelining, no semaphore. First thing to fall over on real data.
     Related: no bound on plan size at /queries/execute, so one posted plan can
@@ -76,3 +67,10 @@ Blocking items are all fixed; these are what's left. Pinned for now.
     - symmetric_difference has both extremes tested (disjoint -> everything, identical
       -> []) but not partial overlap, the only case exercising exclusion AND ordering
       together, and the shape real queries take.
+
+
+DONE:
+- Traversal tool for MCP
+-  Materialize the metagraph
+- Keep real-Redis integration tests for semantics; use fakeredis only for fast invariant checks
+-  How do we handle lost conections with redis?
