@@ -11,6 +11,11 @@ def is_valid_identifier(value: str) -> bool:
     concatenated into keys/values next to a fixed ':', so both must be barred from
     containing one, or a value containing the delimiter could be misparsed as more
     than one field.
+
+    ':' is the only bar. Nothing else about an id has to be restricted for the sake
+    of the HTTP surface: node ids travel as query parameters rather than path
+    segments (see src/api/server.py), so '/' and every other reserved character
+    round-trip.
     """
     if ':' in value:
         return False

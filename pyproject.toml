@@ -9,6 +9,10 @@ dependencies = [
     "httpx",
     "fastapi",
     "uvicorn",
+    # API only, not the SDK: src/client.py emits spans through it, and they are
+    # no-ops until something installs a provider. The SDK and exporters that make
+    # them real are the optional [otel] extra below.
+    "opentelemetry-api",
 ]
 
 [project.optional-dependencies]

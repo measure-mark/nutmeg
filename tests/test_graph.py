@@ -103,6 +103,24 @@ async def test_add_edge_raises_for_colon_in_edge_type():
         await g.add_edge("ada", "celtics", "rel:bad")
 
 
+async def test_slash_is_allowed_in_identifiers():
+    """':' is the only barred character. '/' was briefly barred too, because a node
+    id used to be a URL path segment and a '/' inside one cannot survive routing;
+    the API now takes node ids as query parameters instead, so ids stay opaque
+    strings and the graph layer imposes nothing beyond the key delimiter."""
+    g = NutmegGraph(fakeredis.FakeRedis())
+    await g.add_node("a/b", "player")
+    await g.add_node("c/d", "team")
+    await g.add_edge("a/b", "c/d", "plays/for")
+
+    assert (await g.get_node("a/b"))["node_type"] == "player"
+    assert await g.get_neighbors("a/b", ["plays/for"]) == ["c/d"]
+
+    await g.delete_node("a/b")
+    with pytest.raises(ValueError):
+        await g.get_node("a/b")
+
+
 async def test_get_degree_splits_by_edge_type():
     g = NutmegGraph(fakeredis.FakeRedis())
     await g.add_node("ada", "player")

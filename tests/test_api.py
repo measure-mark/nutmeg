@@ -37,12 +37,12 @@ def test_add_node_then_add_edge_then_degree(client):
     )
 
     assert response.status_code == 204
-    assert client.get("/nodes/ada/degree").json() == {
+    assert client.get("/nodes/degree", params={"node_id": "ada"}).json() == {
         "total": 1,
         "by_type": {"plays_for": 1},
     }
     assert (
-        client.get("/nodes/ada/degree", params={"edge_type": "plays_for"}).json() == 1
+        client.get("/nodes/degree", params={"node_id": "ada", "edge_type": "plays_for"}).json() == 1
     )
 
 
@@ -72,7 +72,7 @@ def test_bulk_load_route_pipelines_nodes_before_edges(client):
         "errors": [],
         "code": "OK",
     }
-    assert client.get("/nodes/ada/neighbors").json() == ["celtics"]
+    assert client.get("/nodes/neighbors", params={"node_id": "ada"}).json() == ["celtics"]
 
 
 def test_bulk_load_route_uses_loader_batch_size_validation(client):
@@ -113,7 +113,7 @@ def test_get_node_returns_node_document(client):
         json={"node_id": "ada", "node_type": "player", "attributes": {"name": "Ada"}},
     )
 
-    assert client.get("/nodes/ada").json() == {
+    assert client.get("/nodes", params={"node_id": "ada"}).json() == {
         "node_type": "player",
         "attributes": {"name": "Ada"},
         "degree": {"total": 0, "by_type": {}},
@@ -121,7 +121,7 @@ def test_get_node_returns_node_document(client):
 
 
 def test_get_node_returns_node_not_found_status_code_if_missing(client):
-    response = client.get("/nodes/ghost")
+    response = client.get("/nodes", params={"node_id": "ghost"})
 
     assert response.status_code == 404
     assert response.json() == {"code": "NODE_NOT_FOUND", "detail": "node 'ghost' does not exist"}
@@ -179,7 +179,7 @@ def test_redis_connection_error_maps_to_service_unavailable(client, monkeypatch)
 
     monkeypatch.setattr(server.graph, "get_node", broken_get_node)
 
-    response = client.get("/nodes/ada")
+    response = client.get("/nodes", params={"node_id": "ada"})
 
     assert response.status_code == 503
     assert response.json()["code"] == "SERVICE_UNAVAILABLE"
@@ -198,7 +198,7 @@ def test_get_neighbors_filters_by_edge_type(client):
         json={"source_node": "ada", "target_node": "grace", "edge_type": "teammate_of"},
     )
 
-    response = client.get("/nodes/ada/neighbors", params={"edge_types": ["plays_for"]})
+    response = client.get("/nodes/neighbors", params={"node_id": "ada", "edge_types": ["plays_for"]})
 
     assert response.json() == ["celtics"]
 
@@ -218,8 +218,13 @@ def test_get_neighbors_accepts_score_window(client):
         )
 
     response = client.get(
-        "/nodes/ada/neighbors",
-        params={"edge_types": ["played_for"], "start": 2010, "end": 2015},
+        "/nodes/neighbors",
+        params={
+            "node_id": "ada",
+            "edge_types": ["played_for"],
+            "start": 2010,
+            "end": 2015,
+        },
     )
 
     assert response.json() == ["lakers", "cavaliers"]
@@ -302,7 +307,7 @@ def test_delete_edge_then_degree_drops_to_zero(client):
     )
 
     assert response.status_code == 204
-    assert client.get("/nodes/ada/degree").json() == {"total": 0, "by_type": {}}
+    assert client.get("/nodes/degree", params={"node_id": "ada"}).json() == {"total": 0, "by_type": {}}
 
 
 def test_add_edge_returns_404_if_target_node_does_not_exist(client):
@@ -329,7 +334,7 @@ def test_delete_node_cascades_through_the_api(client):
         json={"source_node": "ada", "target_node": "celtics", "edge_type": "plays_for"},
     )
 
-    response = client.delete("/nodes/celtics")
+    response = client.delete("/nodes", params={"node_id": "celtics"})
 
     assert response.status_code == 204
-    assert client.get("/nodes/ada/neighbors").json() == []
+    assert client.get("/nodes/neighbors", params={"node_id": "ada"}).json() == []

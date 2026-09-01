@@ -139,14 +139,21 @@ guidance. Bulk loading is not exposed through MCP.
 | Method | Path | Body / Params |
 | --- | --- | --- |
 | `POST` | `/nodes` | `{node_id, node_type, attributes}` |
-| `GET` | `/nodes/{node_id}` | -- |
-| `DELETE` | `/nodes/{node_id}` | -- |
-| `GET` | `/nodes/{node_id}/degree` | `?edge_type=` optional |
-| `GET` | `/nodes/{node_id}/neighbors` | `?edge_types=&start=&end=` optional |
+| `GET` | `/nodes` | `?node_id=` |
+| `DELETE` | `/nodes` | `?node_id=` |
+| `GET` | `/nodes/degree` | `?node_id=`, `?edge_type=` optional |
+| `GET` | `/nodes/neighbors` | `?node_id=`, `?edge_types=&start=&end=` optional |
 | `GET` | `/meta` | -- |
 | `POST` | `/queries/execute` | serialized client query plan |
 | `POST` | `/edges` | `{source_node, target_node, edge_type, attributes, score}` |
 | `DELETE` | `/edges` | `?source_node=&target_node=&edge_type=` |
+
+Node ids are query parameters, never path segments. Ids are opaque caller-supplied
+strings, and a `/` in one cannot survive a path segment -- ASGI servers
+percent-decode before routing, so `/nodes/a%2Fb` arrives as two segments and matches
+no route, leaving such a node permanently unreadable. As a parameter every character
+round-trips, and `:` stays the only character an identifier may not contain (it is
+the Redis key delimiter -- see `src/keys.py`).
 
 All writes are idempotent. A node's type cannot be changed after creation.
 Interactive docs are at `/docs` once the server is running.

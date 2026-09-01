@@ -111,22 +111,28 @@ async def bulk_load(request: BulkLoadRequest) -> dict:
     )
 
 
-@app.delete("/nodes/{node_id}", status_code=204)
+# node_id is a query parameter, not a path segment. Node ids are opaque strings
+# supplied by the caller, and a '/' in one cannot survive a path segment: ASGI
+# servers percent-decode before routing, so /nodes/a%2Fb arrives as two segments
+# and matches no route. A node stored under such an id would be permanently
+# unreadable. As a query parameter it round-trips like any other value, and no
+# character has to be barred from an id to keep the API addressable.
+@app.delete("/nodes", status_code=204)
 async def delete_node(node_id: str) -> None:
     await graph.delete_node(node_id)
 
 
-@app.get("/nodes/{node_id}")
+@app.get("/nodes")
 async def get_node(node_id: str) -> dict:
     return await graph.get_node(node_id)
 
 
-@app.get("/nodes/{node_id}/degree")
+@app.get("/nodes/degree")
 async def get_degree(node_id: str, edge_type: str | None = None):
     return await graph.get_degree(node_id, edge_type)
 
 
-@app.get("/nodes/{node_id}/neighbors")
+@app.get("/nodes/neighbors")
 async def get_neighbors(
     node_id: str,
     edge_types: list[str] = Query(default=[]),
