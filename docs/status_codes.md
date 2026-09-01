@@ -22,7 +22,7 @@ the MCP server via its `@status_coded` tool decorator.
 | `SERVICE_UNAVAILABLE` | The graph store (Redis) could not be reached or timed out. Safe to retry. Also how a bulk load interrupted mid-flight is reported, with the counts loaded before the interruption folded into `detail` -- see [BULK_LOAD.md](BULK_LOAD.md). | -- |
 | `NODE_NOT_FOUND` | A well-formed node id does not exist in the graph. | -- |
 | `MAX_DEPTH_EXCEEDED` | A query plan chains more stages than the server allows to traverse (`MAX_QUERY_DEPTH` in `src/query_wire.py`). | -- |
-| `INVALID_QUERY` | A request document is malformed. | e.g. `UNSUPPORTED_WIRE_VERSION`, `MISSING_START_NODES`, `MISSING_STAGES`, `DUPLICATE_STAGE_NAME`, `UNKNOWN_STAGE_KIND`, `INVALID_FOLLOW_STAGE`, `INVALID_SET_STAGE_SOURCES`, `MISSING_PARENT_STAGE`, `CYCLE`, `INVALID_IDENTIFIER`, `INVALID_BATCH_SIZE`, `INVALID_REQUEST_DOCUMENT`, `FOREIGN_STAGE`, `INVALID_JSON`, and others -- see `src/query_wire.py`, `src/api/server.py`, and `src/client.py` for the full set |
+| `INVALID_QUERY` | A request document is malformed. | e.g. `UNSUPPORTED_WIRE_VERSION`, `MISSING_START_NODES`, `MISSING_STAGES`, `DUPLICATE_STAGE_NAME`, `UNKNOWN_STAGE_KIND`, `INVALID_FOLLOW_STAGE`, `INVALID_SET_STAGE_SOURCES`, `MISSING_PARENT_STAGE`, `CYCLE`, `INVALID_IDENTIFIER`, `INVALID_BATCH_SIZE`, `INVALID_REQUEST_DOCUMENT`, `INVALID_BULK_RECORD`, `NON_FINITE_NUMBER`, `FOREIGN_STAGE`, `INVALID_JSON`, and others -- see `src/query_wire.py`, `src/api/server.py`, and `src/client.py` for the full set |
 | `UNAUTHORIZED` | Reserved for future authentication support; nothing raises it yet. | -- |
 | `BULK_PARTIAL_FAILURE` | A `/bulk-load` request completed, but individual records were rejected. Not raised as an error -- it's the `code` field in an otherwise-200 bulk-load response when `errors` is non-empty. A Redis failure mid-load is *not* this: it stops the load and reports `SERVICE_UNAVAILABLE` instead. See [BULK_LOAD.md](BULK_LOAD.md). | -- |
 | `RESOURCE_LIMIT_EXCEEDED` | A request exceeded a runtime resource limit. | `TIMEOUT` (server- or client-side), `RESULT_TOO_LARGE` (the query's combined stage and score entries exceeded `max_result_nodes`) |
@@ -71,6 +71,22 @@ with the same reasons the server would use for the equivalent wire document
 `INVALID_SET_STAGE_SOURCES`) plus `FOREIGN_STAGE`, which has no wire
 equivalent. Callers switch on `.code`/`.reason` whether validation happened
 here or on the server.
+
+Bulk-load records are checked locally the same way, before the request is built,
+because a body of a hundred thousand records is no place to learn only that
+*something* in it was bad. `INVALID_BULK_RECORD` covers a record that isn't a
+mapping, is missing a required field, or gives a non-string id or type;
+`NON_FINITE_NUMBER` covers a NaN or infinity in `attributes` or `score`, which
+JSON cannot represent. Both name the record by kind and index and the field by
+name -- `node at index 2 has node_id=NaN` -- since input this size is usually
+machine-generated and the caller needs to find the row. NaN is called out
+explicitly in the message: it is what a dataframe leaves behind for a missing
+value, and by far the most common cause.
+
+Anything else the JSON encoder rejects -- a numpy scalar, a set, a datetime --
+is `INVALID_REQUEST_DOCUMENT`, raised for any route with a body. The client
+encodes bodies itself rather than letting httpx do it, so these are coded
+errors instead of a `ValueError` or `TypeError` from inside the transport.
 
 The request-side entry points taking a wire document as text rather than a dict
 -- `query_from_json` and `NutmegQuery.from_json` -- report unparseable input as

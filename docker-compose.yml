@@ -6,7 +6,7 @@ x-app-build: &app-build
       WORKDIR /app
       COPY pyproject.toml ./
       RUN pip install --no-cache-dir redis fastmcp httpx fastapi uvicorn \
-          opentelemetry-sdk opentelemetry-exporter-otlp-proto-http \
+          opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http \
           opentelemetry-instrumentation-fastapi opentelemetry-instrumentation-redis
       COPY src/ ./src/
       COPY main.py mcp_main.py ./
@@ -41,7 +41,7 @@ services:
       API_PORT: "3879"
       # Setting the endpoint is what turns telemetry on -- see src/telemetry.py.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      OTEL_SERVICE_NAME: nutmeg-api
+      OTEL_SERVICE_NAME: nutmeg
     ports:
       - "127.0.0.1:3879:3879"
     depends_on:

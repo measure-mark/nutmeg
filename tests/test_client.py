@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from src.bulk_redis import DEFAULT_BATCH_SIZE
+import src.client as client_module
 from src.client import NutmegClient, NutmegHTTPError, NutmegQuery, QueryResult
 from src.status_codes import InvalidQueryError, InvalidResponseError, StatusCode
 
@@ -25,17 +26,17 @@ def fake_http(monkeypatch):
         async def __aexit__(self, exc_type, exc, traceback):
             return False
 
-        async def request(self, method, url, *, params=None, json=None):
+        async def request(self, method, url, *, params=None, content=None, headers=None):
+            # The client encodes the body itself (see _encode_body), so the fake
+            # decodes it back to compare against what callers passed in.
             full_url = str(httpx.URL(url, params=params))
             calls.append(
                 {
                     "method": method,
                     "url": full_url,
-                    "headers": {"Content-type": "application/json"}
-                    if json is not None
-                    else {},
+                    "headers": dict(headers or {}),
                     "timeout": self.timeout,
-                    "body": json,
+                    "body": None if content is None else json.loads(content),
                 }
             )
             response = responses[full_url]
@@ -69,13 +70,13 @@ async def test_http_client_builds_direct_requests_and_handles_empty_responses(
     client = NutmegClient("http://nutmeg.test", timeout=3)
     responses.update(
         {
-            "http://nutmeg.test/nodes/ada": {"node_type": "person"},
-            "http://nutmeg.test/nodes/ada/degree": {
+            "http://nutmeg.test/nodes?node_id=ada": {"node_type": "person"},
+            "http://nutmeg.test/nodes/degree?node_id=ada": {
                 "total": 1,
                 "by_type": {"friend": 1},
             },
-            "http://nutmeg.test/nodes/ada/degree?edge_type=friend": 1,
-            "http://nutmeg.test/nodes/ada/neighbors?edge_types=a&edge_types=b&start=10&end=20": [
+            "http://nutmeg.test/nodes/degree?node_id=ada&edge_type=friend": 1,
+            "http://nutmeg.test/nodes/neighbors?node_id=ada&edge_types=a&edge_types=b&start=10&end=20": [
                 "bob"
             ],
             "http://nutmeg.test/empty": None,
@@ -88,10 +89,10 @@ async def test_http_client_builds_direct_requests_and_handles_empty_responses(
     assert await client.get_neighbors("ada", ["a", "b"], start=10, end=20) == ["bob"]
     assert await client._request("DELETE", "/empty") is None
     assert [call["url"] for call in calls] == [
-        "http://nutmeg.test/nodes/ada",
-        "http://nutmeg.test/nodes/ada/degree",
-        "http://nutmeg.test/nodes/ada/degree?edge_type=friend",
-        "http://nutmeg.test/nodes/ada/neighbors?edge_types=a&edge_types=b&start=10&end=20",
+        "http://nutmeg.test/nodes?node_id=ada",
+        "http://nutmeg.test/nodes/degree?node_id=ada",
+        "http://nutmeg.test/nodes/degree?node_id=ada&edge_type=friend",
+        "http://nutmeg.test/nodes/neighbors?node_id=ada&edge_types=a&edge_types=b&start=10&end=20",
         "http://nutmeg.test/empty",
     ]
 
@@ -121,7 +122,7 @@ async def test_bulk_load_is_one_client_request_with_explicit_batching(fake_http)
         {
             "method": "POST",
             "url": "http://nutmeg.test/bulk-load",
-            "headers": {"Content-type": "application/json"},
+            "headers": {"content-type": "application/json"},
             "timeout": 10,
             "body": {
                 "nodes": [
@@ -148,18 +149,236 @@ async def test_bulk_load_uses_the_shared_default_batch_size(fake_http):
     assert calls[0]["body"]["batch_size"] == DEFAULT_BATCH_SIZE
 
 
+async def test_reserved_characters_in_a_node_id_travel_as_a_query_parameter(fake_http):
+    """Node ids are opaque strings, so '/', '#', '?' and '%' all occur and all mean
+    something to a URL parser. They ride in the query string rather than the path --
+    a '/' in a path segment cannot survive routing at all (ASGI decodes %2F before
+    matching), which is why the node routes take node_id as a parameter."""
+    responses, calls = fake_http
+    client = NutmegClient("http://nutmeg.test")
+    responses.update(
+        {
+            "http://nutmeg.test/nodes?node_id=a%2Fb": {"node_type": "person"},
+            "http://nutmeg.test/nodes/degree?node_id=c%23d": 0,
+            "http://nutmeg.test/nodes/neighbors?node_id=e+f": [],
+            "http://nutmeg.test/nodes?node_id=g%25h": None,
+        }
+    )
+
+    await client.get_node("a/b")
+    await client.get_degree("c#d")
+    await client.get_neighbors("e f")
+    await client.delete_node("g%h")
+
+    assert [call["url"] for call in calls] == [
+        "http://nutmeg.test/nodes?node_id=a%2Fb",
+        "http://nutmeg.test/nodes/degree?node_id=c%23d",
+        "http://nutmeg.test/nodes/neighbors?node_id=e+f",
+        "http://nutmeg.test/nodes?node_id=g%25h",
+    ]
+
+
+@pytest.fixture
+def recorded_spans(monkeypatch):
+    """A tracer that keeps its spans in memory, swapped in for the client's module
+    tracer. Deliberately a local TracerProvider rather than the global one: the
+    global can only be set once per process, so setting it here would leak into
+    every later test."""
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(client_module, "_TRACER", provider.get_tracer("test"))
+    return exporter
+
+
+async def test_app_name_is_attached_to_every_client_span(fake_http, recorded_spans):
+    """The point of app_name: several callers share one Nutmeg, and traces have to
+    say which one made a request. Absent when not given, rather than a placeholder."""
+    responses, _ = fake_http
+    responses["http://nutmeg.test/nodes?node_id=ada"] = {"node_type": "person"}
+
+    await NutmegClient("http://nutmeg.test", app_name="neighborhood-etl").get_node("ada")
+    await NutmegClient("http://nutmeg.test").get_node("ada")
+
+    named, anonymous = recorded_spans.get_finished_spans()
+    assert named.name == "GET /nodes"
+    assert named.attributes["nutmeg.app_name"] == "neighborhood-etl"
+    assert named.attributes["http.request.method"] == "GET"
+    assert named.attributes["http.response.status_code"] == 200
+    assert "nutmeg.app_name" not in anonymous.attributes
+
+
+async def test_client_spans_carry_trace_context_to_the_server(fake_http, recorded_spans):
+    """The client injects traceparent so the server's span for the request becomes a
+    child of the client's -- one trace across caller, API, and Redis. Without this
+    the two ends show up as unrelated traces."""
+    responses, calls = fake_http
+    responses["http://nutmeg.test/nodes?node_id=ada"] = {"node_type": "person"}
+
+    await NutmegClient("http://nutmeg.test").get_node("ada")
+
+    span = recorded_spans.get_finished_spans()[0]
+    traceparent = calls[0]["headers"]["traceparent"]
+    assert format(span.context.trace_id, "032x") in traceparent
+
+
+async def test_bulk_load_codes_records_json_cannot_represent(fake_http):
+    """A NaN node id -- what a dataframe column leaves behind for a missing value --
+    used to surface as a bare ValueError from inside httpx, naming no record. It is
+    the most common way real bulk input goes wrong, so it has to be a coded error
+    that points at the offending record."""
+    _, calls = fake_http
+    client = NutmegClient("http://nutmeg.test")
+
+    with pytest.raises(InvalidQueryError) as exc:
+        await client.bulk_load(
+            nodes=[
+                {"node_id": "ada", "node_type": "person"},
+                {"node_id": float("nan"), "node_type": "person"},
+            ]
+        )
+
+    assert exc.value.code == StatusCode.INVALID_QUERY
+    assert exc.value.reason == "INVALID_BULK_RECORD"
+    assert "node at index 1" in exc.value.message
+    assert "node_id=NaN" in exc.value.message
+    assert "missing value in the source data" in exc.value.message
+    assert calls == [], "nothing should be sent once a record is known to be bad"
+
+
+async def test_bulk_load_names_the_field_of_a_nested_non_finite_value(fake_http):
+    """The same NaN problem one level down, in an attribute value -- reported against
+    its own reason, since the fix is to clean the attribute rather than the id."""
+    client = NutmegClient("http://nutmeg.test")
+
+    with pytest.raises(InvalidQueryError) as exc:
+        await client.bulk_load(
+            edges=[
+                {
+                    "source_node": "ada",
+                    "target_node": "grace",
+                    "edge_type": "knows",
+                    "attributes": {"weights": [1.0, float("inf")]},
+                }
+            ]
+        )
+
+    assert exc.value.reason == "NON_FINITE_NUMBER"
+    assert "edge at index 0" in exc.value.message
+    assert "attributes['weights'][1]" in exc.value.message
+
+
+async def test_bulk_load_reports_a_malformed_record_by_index(fake_http):
+    """Missing fields and non-mapping records get the same treatment: which record,
+    which field, rather than a pydantic 422 from the server describing neither."""
+    client = NutmegClient("http://nutmeg.test")
+
+    with pytest.raises(InvalidQueryError) as exc:
+        await client.bulk_load(nodes=[{"node_id": "ada"}])
+    assert exc.value.reason == "INVALID_BULK_RECORD"
+    assert "missing required field 'node_type'" in exc.value.message
+
+    with pytest.raises(InvalidQueryError) as exc:
+        await client.bulk_load(nodes=["ada"])
+    assert exc.value.reason == "INVALID_BULK_RECORD"
+    assert "must be a mapping" in exc.value.message
+
+
+async def test_any_unserializable_body_is_coded_rather_than_raised_raw(fake_http):
+    """Backstop for every route, not just bulk load: the client encodes the body
+    itself so a value json cannot handle -- a numpy scalar, a set -- is a NutmegError
+    instead of a TypeError from inside the transport."""
+    client = NutmegClient("http://nutmeg.test")
+
+    with pytest.raises(InvalidQueryError) as exc:
+        await client.add_node("ada", "person", {"tags": {"a", "b"}})
+
+    assert exc.value.code == StatusCode.INVALID_QUERY
+    assert exc.value.reason == "INVALID_REQUEST_DOCUMENT"
+    assert "not JSON-serializable" in exc.value.message
+
+
+async def test_single_item_writes_match_the_http_surface(fake_http):
+    """The client mirrors the API's per-item routes, so the bodies it sends have to
+    match what src/api/server.py's NodeCreate and EdgeCreate accept -- including the
+    defaults, and delete_edge identifying its edge by query params rather than a body."""
+    responses, calls = fake_http
+    client = NutmegClient("http://nutmeg.test")
+    delete_edge_url = (
+        "http://nutmeg.test/edges?source_node=ada&target_node=grace&edge_type=knows"
+    )
+    responses.update(
+        {
+            "http://nutmeg.test/nodes": None,
+            "http://nutmeg.test/edges": None,
+            "http://nutmeg.test/nodes?node_id=ada": None,
+            delete_edge_url: None,
+        }
+    )
+
+    assert await client.add_node("ada", "person", {"name": "Ada"}) is None
+    assert await client.add_edge("ada", "grace", "knows", score=0.5) is None
+    assert await client.delete_edge("ada", "grace", "knows") is None
+    assert await client.delete_node("ada") is None
+
+    assert [(call["method"], call["url"], call["body"]) for call in calls] == [
+        (
+            "POST",
+            "http://nutmeg.test/nodes",
+            {"node_id": "ada", "node_type": "person", "attributes": {"name": "Ada"}},
+        ),
+        (
+            "POST",
+            "http://nutmeg.test/edges",
+            {
+                "source_node": "ada",
+                "target_node": "grace",
+                "edge_type": "knows",
+                "attributes": {},
+                "score": 0.5,
+            },
+        ),
+        ("DELETE", delete_edge_url, None),
+        ("DELETE", "http://nutmeg.test/nodes?node_id=ada", None),
+    ]
+
+
+async def test_get_meta_graph_returns_the_graph_shape(fake_http):
+    """GET /meta is the one read the client was missing; it returns a body, unlike the
+    204s above, so it goes through the JSON path rather than returning None."""
+    responses, calls = fake_http
+    meta = {
+        "node_counts": {"person": 2},
+        "edge_counts": {"knows": 1},
+        "node_edge_counts": [
+            {"source_type": "person", "edge_type": "knows", "count": 1}
+        ],
+    }
+    responses["http://nutmeg.test/meta"] = meta
+
+    assert await NutmegClient("http://nutmeg.test").get_meta_graph() == meta
+    assert calls[0]["url"] == "http://nutmeg.test/meta"
+
+
 async def test_http_client_extracts_json_and_plain_error_details(fake_http):
     responses, _ = fake_http
     client = NutmegClient("http://nutmeg.test")
 
-    responses["http://nutmeg.test/nodes/json-error"] = make_http_error(
+    responses["http://nutmeg.test/nodes?node_id=json-error"] = make_http_error(
         {"detail": "node missing"}
     )
     with pytest.raises(NutmegHTTPError) as exc:
         await client.get_node("json-error")
     assert exc.value.detail == "node missing"
 
-    responses["http://nutmeg.test/nodes/plain-error"] = make_http_error("plain bad")
+    responses["http://nutmeg.test/nodes?node_id=plain-error"] = make_http_error("plain bad")
     with pytest.raises(NutmegHTTPError) as exc:
         await client.get_node("plain-error")
     assert exc.value.detail == "plain bad"
@@ -171,7 +390,7 @@ async def test_http_client_surfaces_code_and_reason_when_the_body_carries_them(f
     responses, _ = fake_http
     client = NutmegClient("http://nutmeg.test")
 
-    responses["http://nutmeg.test/nodes/ghost"] = make_http_error(
+    responses["http://nutmeg.test/nodes?node_id=ghost"] = make_http_error(
         {"code": "NODE_NOT_FOUND", "detail": "node 'ghost' does not exist"}, status_code=404
     )
     with pytest.raises(NutmegHTTPError) as exc:
@@ -188,7 +407,7 @@ async def test_http_client_error_without_a_code_leaves_code_and_reason_none(fake
     responses, _ = fake_http
     client = NutmegClient("http://nutmeg.test")
 
-    responses["http://nutmeg.test/nodes/plain-error"] = make_http_error("plain bad")
+    responses["http://nutmeg.test/nodes?node_id=plain-error"] = make_http_error("plain bad")
     with pytest.raises(NutmegHTTPError) as exc:
         await client.get_node("plain-error")
 
@@ -210,7 +429,7 @@ async def test_http_client_maps_a_request_timeout_to_resource_limit_exceeded(mon
         async def __aexit__(self, exc_type, exc, traceback):
             return False
 
-        async def request(self, method, url, *, params=None, json=None):
+        async def request(self, method, url, *, params=None, content=None, headers=None):
             raise httpx.TimeoutException("timed out", request=httpx.Request(method, url))
 
     monkeypatch.setattr("src.client.httpx.AsyncClient", TimingOutAsyncClient)
@@ -316,7 +535,7 @@ async def test_execute_posts_query_once_and_hydrates_result(fake_http):
         {
             "method": "POST",
             "url": "http://nutmeg.test/queries/execute",
-            "headers": {"Content-type": "application/json"},
+            "headers": {"content-type": "application/json"},
             "timeout": 4,
             "body": query.to_dict(),
         }
@@ -448,7 +667,7 @@ async def test_successful_response_with_a_non_json_body_is_coded(fake_http):
     JSONDecodeError. It's the server breaking the contract, so it's
     INVALID_RESPONSE/INVALID_RESPONSE_JSON like any other unusable response."""
     responses, _ = fake_http
-    responses["http://nutmeg.test/nodes/ada"] = (200, "<html>gateway</html>")
+    responses["http://nutmeg.test/nodes?node_id=ada"] = (200, "<html>gateway</html>")
 
     with pytest.raises(InvalidResponseError) as exc:
         await NutmegClient("http://nutmeg.test").get_node("ada")

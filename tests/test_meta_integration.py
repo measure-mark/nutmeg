@@ -23,9 +23,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def _request(method, path, body=None):
+async def _request(method, path, body=None, params=None):
     async with httpx.AsyncClient(base_url=LIVE_URL, timeout=5) as client:
-        response = await client.request(method, path, json=body)
+        response = await client.request(method, path, json=body, params=params)
         response.raise_for_status()
         return response.json() if response.content else None
 
@@ -67,7 +67,7 @@ async def test_meta_counts_follow_atomic_write_lifecycle():
         assert conflict.json()["code"] == "DATA_ERROR"
         assert missing_target.status_code == 404
         assert missing_target.json()["code"] == "NODE_NOT_FOUND"
-        assert (await _request("GET", f"/nodes/{person1}"))["node_type"] == person_type
+        assert (await _request("GET", "/nodes", params={"node_id": person1}))["node_type"] == person_type
 
         await asyncio.gather(*[_add_edge(person1, team, member_edge) for _ in range(12)])
         await _add_edge(person2, team, member_edge)
@@ -124,21 +124,21 @@ async def test_meta_counts_follow_atomic_write_lifecycle():
         assert (await _request("GET", "/meta"))["edge_counts"][member_edge] == 2
 
         await _add_edge(person2, team, member_edge)
-        await _request("DELETE", f"/nodes/{team}")
+        await _request("DELETE", "/nodes", params={"node_id": team})
         meta = await _request("GET", "/meta")
         assert member_edge not in meta["edge_counts"]
         assert not any(record["edge_type"] == member_edge for record in meta["node_edge_counts"])
         assert not any(record["edge_type"] == member_edge for record in meta["node_edge_node_counts"])
         assert team_type not in meta["node_counts"]
 
-        await _request("DELETE", f"/nodes/{person1}")
+        await _request("DELETE", "/nodes", params={"node_id": person1})
         meta = await _request("GET", "/meta")
         assert self_edge not in meta["edge_counts"]
         assert meta["node_counts"][person_type] == 1
     finally:
         for node_id in node_ids:
             try:
-                await _request("DELETE", f"/nodes/{node_id}")
+                await _request("DELETE", "/nodes", params={"node_id": node_id})
             except Exception:
                 pass
 
@@ -166,6 +166,6 @@ async def test_mcp_meta_graph_matches_http_snapshot():
     finally:
         for node_id in (source, target):
             try:
-                await _request("DELETE", f"/nodes/{node_id}")
+                await _request("DELETE", "/nodes", params={"node_id": node_id})
             except Exception:
                 pass

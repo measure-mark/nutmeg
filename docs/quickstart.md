@@ -21,7 +21,16 @@ curl -X POST http://127.0.0.1:3879/nodes \
 ```
 
 Node ids are plain, globally unique strings. `node_type` is already a separate
-field, so an id should not repeat it.
+field, so an id should not repeat it. Ids are opaque -- `/`, `#`, `?` and spaces
+are all fine, since the read routes take `node_id` as a query parameter rather
+than a path segment. `:` is the one character an id may not contain; it is the
+Redis key delimiter. Reads look like:
+
+```
+curl 'http://127.0.0.1:3879/nodes?node_id=ada'
+curl 'http://127.0.0.1:3879/nodes/degree?node_id=ada'
+curl 'http://127.0.0.1:3879/nodes/neighbors?node_id=ada&edge_types=plays_for'
+```
 
 ## Local
 
@@ -51,6 +60,22 @@ traces out to the `otel-gui` viewer and exposes metrics for Prometheus.
 Traces cover HTTP requests (FastAPI), MCP tool calls (FastMCP emits these
 itself), and the Redis commands underneath both, so a single query's fan-out is
 one trace. otel-gui keeps traces in memory only; they are gone on restart.
+
+`NutmegClient` traces too, under the service name `nutmeg-client` when it is the
+process -- a notebook or a script -- and under the server's own name when it is
+used inside one. It propagates trace context, so a client call, the API request it
+makes, and the Redis commands beneath that are all one trace. Name the caller to
+tell several of them apart:
+
+```python
+nutmeg = NutmegClient("http://127.0.0.1:3879", app_name="neighborhood-etl")
+```
+
+`app_name` lands on every client span as `nutmeg.app_name`. In a notebook, set
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` before importing the client.
+Spans are batched, so a short-lived script should call
+`trace.get_tracer_provider().shutdown()` before exiting or the last ones never
+leave the process.
 
 To trace a locally-run server against the Compose collector:
 
